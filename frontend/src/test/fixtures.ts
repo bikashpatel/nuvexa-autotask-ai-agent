@@ -1,0 +1,85 @@
+import type { ActionDetail, AnalysisOut } from '../api/types';
+
+export const HASH_V3 = 'a'.repeat(64);
+export const HASH_V4 = 'b'.repeat(64);
+
+export function adoAction(overrides: Partial<ActionDetail> = {}): ActionDetail {
+  return {
+    id: 'act-1',
+    workflow_run_id: 'run-1',
+    email_message_id: 'email-1',
+    owner_user_id: 'u-1',
+    action_type: 'create_azure_devops_work_item',
+    target_integration: 'azure_devops',
+    status: 'pending_approval',
+    version: 3,
+    payload: {
+      kind: 'create_azure_devops_work_item',
+      project: 'Payments',
+      work_item_type: 'Bug',
+      title: 'Checkout fails with 500 for EU customers',
+      description: 'Customers in the EU region see HTTP 500 on checkout.',
+      priority: 1,
+      area_path: null,
+      iteration_path: null,
+      tags: ['checkout'],
+      assigned_to: null,
+      additional_fields: {},
+      source_email: { email_id: 'email-1', subject: 'URGENT: checkout broken' },
+    },
+    payload_hash: HASH_V3,
+    title: 'Create bug: Checkout fails with 500 for EU customers',
+    rationale: 'The sender reports a production outage affecting checkout.',
+    expected_impact: 'Engineering is notified with the reported facts.',
+    required_permissions: ['azure_devops:vso.work_write', 'nuvexa:action.execute'],
+    idempotency_key: 'f'.repeat(64),
+    validation_errors: [],
+    validation_warnings: [],
+    source: 'planner',
+    external_id: null,
+    external_url: null,
+    last_error: null,
+    created_at: '2026-10-24T10:00:00Z',
+    updated_at: '2026-10-24T10:00:00Z',
+    executed_at: null,
+    current_approval: null,
+    permissions: {
+      can_edit: true,
+      can_approve: true,
+      can_reject: true,
+      can_cancel: true,
+      can_execute: true,
+      can_reconcile: false,
+    },
+    email_subject: 'URGENT: checkout broken',
+    approvals: [],
+    executions: [],
+    ...overrides,
+  };
+}
+
+export function analysis(overrides: Partial<AnalysisOut> = {}): AnalysisOut {
+  return {
+    id: 'an-1',
+    workflow_run_id: 'run-1',
+    attempt: 1,
+    category: 'incident',
+    priority: 'high',
+    urgency: 'immediate',
+    action_recommended: true,
+    needs_more_info: false,
+    confidence_score: 0.62,
+    confidence_bucket: 'medium',
+    confidence_method: 'heuristic-v1',
+    classification: { rationale: 'Production checkout outage reported.' },
+    extraction: {},
+    injection_flags: [],
+    validation_warnings: [],
+    model_provider: 'heuristic',
+    model_name: 'heuristic-demo',
+    prompt_version: 'p1',
+    schema_version: 's1',
+    created_at: '2026-10-24T10:00:00Z',
+    ...overrides,
+  };
+}

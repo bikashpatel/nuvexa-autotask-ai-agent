@@ -1,0 +1,95 @@
+:root {
+  --nuvexa-gradient: linear-gradient(
+    135deg,
+    var(--mantine-color-nuvexa-6) 0%,
+    var(--mantine-color-lagoon-6) 100%
+  );
+}
+
+body {
+  background-color: var(--mantine-color-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Visible focus for every interactive element, including custom clickable rows/cards. */
+:where(
+  a,
+  button,
+  [role='button'],
+  [tabindex]:not([tabindex='-1']),
+  input,
+  select,
+  textarea,
+  summary
+):focus-visible {
+  outline: 2px solid var(--mantine-primary-color-filled);
+  outline-offset: 2px;
+}
+
+/* Untrusted text (email bodies, AI output, drafts): plain text only, wrapped, never interpreted. */
+.nuvexa-plain-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-size: var(--mantine-font-size-sm);
+  line-height: 1.6;
+}
+
+.nuvexa-app-bg {
+  background-color: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
+}
+
+.nuvexa-brand-mark {
+  background: var(--nuvexa-gradient);
+  color: var(--mantine-color-white);
+}
+
+.nuvexa-hero {
+  background:
+    radial-gradient(1200px 600px at 10% 0%, rgba(91, 69, 235, 0.35), transparent 60%),
+    radial-gradient(900px 500px at 90% 100%, rgba(51, 187, 197, 0.28), transparent 60%),
+    light-dark(#0f1029, #0b0c1f);
+  color: var(--mantine-color-white);
+}
+
+.nuvexa-sticky-panel {
+  position: sticky;
+  top: calc(var(--app-shell-header-height, 60px) + var(--mantine-spacing-md));
+}
+
+@media (max-width: 62em) {
+  .nuvexa-sticky-panel {
+    position: static;
+  }
+}
+
+.nuvexa-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.nuvexa-bar-track {
+  background-color: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5));
+  border-radius: 4px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.nuvexa-bar-fill {
+  height: 100%;
+  border-radius: 0 4px 4px 0;
+  min-width: 2px;
+}
+
+.nuvexa-row-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.nuvexa-row-link:hover {
+  text-decoration: underline;
+}
+
+.nuvexa-invalidated {
+  text-decoration: line-through;
+  opacity: 0.7;
+}

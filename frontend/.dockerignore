@@ -1,0 +1,15 @@
+# Keep the build context small and free of host artefacts.
+node_modules
+dist
+coverage
+.vite
+*.tsbuildinfo
+npm-debug.log*
+.DS_Store
+.env
+.env.*
+.git
+.gitignore
+Dockerfile
+.dockerignore
+README.md

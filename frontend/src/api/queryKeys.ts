@@ -1,0 +1,27 @@
+/** Central TanStack Query keys so invalidation stays consistent across features. */
+export const queryKeys = {
+  authConfig: ['auth', 'config'] as const,
+  me: ['auth', 'me'] as const,
+  health: ['health', 'ready'] as const,
+  dashboard: ['dashboard', 'summary'] as const,
+  integrations: ['integrations'] as const,
+  adoProjects: ['integrations', 'azure-devops', 'projects'] as const,
+  adoWorkItemTypes: (project: string) =>
+    ['integrations', 'azure-devops', 'projects', project, 'types'] as const,
+  emails: ['emails'] as const,
+  emailList: (filters: object) => ['emails', 'list', filters] as const,
+  email: (id: string) => ['emails', 'detail', id] as const,
+  workflows: ['workflows'] as const,
+  workflowList: (params: object) => ['workflows', 'list', params] as const,
+  workflow: (id: string) => ['workflows', 'detail', id] as const,
+  workflowAnalysis: (id: string) => ['workflows', 'detail', id, 'analysis'] as const,
+  actions: ['actions'] as const,
+  actionList: (params: object) => ['actions', 'list', params] as const,
+  action: (id: string) => ['actions', 'detail', id] as const,
+  actionHistory: (id: string) => ['actions', 'detail', id, 'history'] as const,
+  tasks: ['tasks'] as const,
+  taskList: (params: object) => ['tasks', 'list', params] as const,
+  replyDrafts: (params: object) => ['reply-drafts', params] as const,
+  audit: (params: object) => ['audit-events', params] as const,
+  settings: ['settings'] as const,
+};
