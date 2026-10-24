@@ -37,5 +37,31 @@ export default defineConfig({
     css: false,
     restoreMocks: true,
     clearMocks: true,
+    // Headroom for the heaviest page renders (Settings: ~100 Mantine inputs) under parallel-worker
+    // load. Tests take well under 2 s locally; this bound only prevents CI flakiness.
+    testTimeout: 15_000,
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        // Tests and test-only helpers (render wrappers, fetch mock, fixtures, axe helper).
+        'src/**/*.test.{ts,tsx}',
+        'src/test/**',
+        // Ambient type declarations carry no runtime code.
+        'src/**/*.d.ts',
+        // Bootstrap entry: imports global CSS and calls createRoot() on #root. It contains no logic
+        // of its own — the providers (App.tsx), router and query client it wires are tested directly.
+        'src/main.tsx',
+      ],
+      reporter: ['text', 'lcov', 'json-summary'],
+      reportsDirectory: './coverage',
+      // Achieved coverage rounded down (99.93 / 100 / 100 / 98.55). Any new uncovered code fails CI.
+      thresholds: {
+        statements: 99,
+        lines: 100,
+        functions: 100,
+        branches: 98,
+      },
+    },
   },
 });

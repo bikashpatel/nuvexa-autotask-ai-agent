@@ -66,7 +66,10 @@ export const theme = createTheme({
     ActionIcon: ActionIcon.extend({ defaultProps: { variant: 'subtle', radius: 'md' } }),
     Badge: Badge.extend({ defaultProps: { radius: 'sm', tt: 'none' } }),
     Tooltip: Tooltip.extend({ defaultProps: { withArrow: true, openDelay: 150, multiline: true, maw: 320 } }),
-    Modal: Modal.extend({ defaultProps: { centered: true, radius: 'md' } }),
+    // Mantine's close (×) button has no accessible name by default (axe: button-name, critical).
+    Modal: Modal.extend({
+      defaultProps: { centered: true, radius: 'md', closeButtonProps: { 'aria-label': 'Close dialog' } },
+    }),
     Alert: Alert.extend({ defaultProps: { radius: 'md' } }),
     Table: Table.extend({ defaultProps: { verticalSpacing: 'sm', highlightOnHover: true } }),
   },

@@ -89,6 +89,9 @@ class WorkflowEngine:
                 except AppError as exc:
                     await s.rollback()
                     log.warning("workflow_fallback_operation_failed", code=exc.code, run_id=str(run_id))
+                except ValueError, TypeError:  # malformed resume payload
+                    await s.rollback()
+                    log.warning("workflow_fallback_malformed_request", run_id=str(run_id))
         await self.sync_run_status(run_id, note=f"graph not waiting; handled '{decision_type}' directly")
 
     async def sync_run_status(self, run_id: uuid.UUID, *, note: str) -> None:

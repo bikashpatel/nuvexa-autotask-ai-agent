@@ -13,7 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import AuthenticationRequired, ConfigurationError, Conflict, PermissionDenied
+from app.core.errors import AuthenticationRequired, ConfigurationError, Conflict, NotFound, PermissionDenied
 from app.core.security import SecretBox, constant_time_equals, generate_token, hash_token
 from app.core.timeutil import utcnow
 from app.db.models import ConnectedAccount, OAuthState, Tenant, User, UserSession
@@ -36,7 +36,8 @@ from app.services.audit import record_audit
 from app.services.authz import Actor
 from app.services.identity import actor_from_user
 
-_SAFE_REDIRECT_RE = re.compile(r"^/(?!/)[A-Za-z0-9/_\-?=&.%]*$")
+# `\Z`, not `$`: `$` also matches before a trailing newline, which would let "/x\n" into a Location header.
+_SAFE_REDIRECT_RE = re.compile(r"^/(?!/)[A-Za-z0-9/_\-?=&.%]*\Z")
 _OAUTH_STATE_TTL = timedelta(minutes=10)
 _TOUCH_INTERVAL = timedelta(seconds=60)
 
@@ -126,6 +127,18 @@ class SessionService:
         resolved.session.revoked_at = utcnow()
         await session.commit()
 
+    async def revoke_token(self, session: AsyncSession, token: str | None) -> None:
+        """Revoke the session a browser presents before it is replaced (session-fixation defence).
+
+        Adds to the caller's transaction; unknown or malformed tokens are ignored."""
+        if not token or len(token) > 200:
+            return
+        await session.execute(
+            update(UserSession)
+            .where(UserSession.token_hash == hash_token(token), UserSession.revoked_at.is_(None))
+            .values(revoked_at=utcnow())
+        )
+
 
 class DemoAuthService:
     """Demo personas inside a dedicated demo tenant (only when DEMO_MODE and not production)."""
@@ -133,7 +146,7 @@ class DemoAuthService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    async def login(self, session: AsyncSession, persona: str) -> User:
+    async def login(self, session: AsyncSession, persona: str, *, ip: str | None = None) -> User:
         if not self.settings.demo_login_enabled:
             raise PermissionDenied("Demo login is disabled.")
         spec = DEMO_PERSONAS.get(persona)
@@ -182,7 +195,7 @@ class DemoAuthService:
         record_audit(
             session,
             tenant_id=tenant.id,
-            actor=actor_from_user(user),
+            actor=actor_from_user(user, ip),
             event_type="login",
             resource_type="user",
             resource_id=user.id,
@@ -294,11 +307,9 @@ class EntraAuthService:
             .scalars()
             .first()
         )
+        # Always start from an empty cache: the redeemed tokens replace whatever was stored, and tokens of a
+        # previously connected (different) Microsoft account must never be carried into the new connection.
         cache = msal.SerializableTokenCache()
-        if account is not None:
-            existing = await store.load_cache(account)
-            if existing is not None:
-                cache = existing
         result = await self.oauth.complete_flow(flow, params, cache)
         tenant = await session.get(Tenant, current_user.tenant_id)
         if tenant is not None and tenant.entra_tenant_id and result.tid != tenant.entra_tenant_id:
@@ -390,8 +401,8 @@ async def disconnect_account(session: AsyncSession, actor: Actor, account_id: uu
             )
         )
     ).scalar_one_or_none()
-    if account is None:
-        raise Conflict("Connection not found.")
+    if account is None:  # unknown, foreign and other-tenant ids look the same: 404 (docs/api.md)
+        raise NotFound("Connection not found.")
     if account.provider is ConnectionProvider.DEMO_MAILBOX:
         raise Conflict("The demo mailbox cannot be disconnected.")
     if settings.token_encryption_keys is not None:

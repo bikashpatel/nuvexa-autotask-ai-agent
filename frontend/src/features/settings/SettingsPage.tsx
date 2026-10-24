@@ -426,7 +426,7 @@ export function SettingsPage() {
         </Alert>
       ) : null}
       {settings.isPending ? (
-        <Stack gap="md" aria-busy="true" aria-label="Loading settings">
+        <Stack gap="md" role="status" aria-busy="true" aria-label="Loading settings">
           <Skeleton height={260} />
           <Skeleton height={260} />
         </Stack>

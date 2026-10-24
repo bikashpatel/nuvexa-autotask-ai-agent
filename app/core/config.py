@@ -6,6 +6,7 @@ Tenant-level, user-editable configuration lives in the `app_settings` table
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from functools import lru_cache
 from typing import Annotated, Literal, Self
@@ -45,6 +46,10 @@ def _split_csv(value: object) -> object:
 
 CsvList = Annotated[list[str], NoDecode]
 
+_ORIGIN_RE = re.compile(
+    r"^https?://(localhost|\[[0-9a-fA-F:]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)(:\d{1,5})?$"
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -69,6 +74,9 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://nuvexa:nuvexa@localhost:5432/nuvexa"
     database_echo: bool = False
     database_pool_size: int = Field(default=5, ge=1, le=100)
+    # PostgreSQL session limits (resource-exhaustion guard); 0 disables.
+    database_statement_timeout_ms: int = Field(default=30_000, ge=0)
+    database_lock_timeout_ms: int = Field(default=10_000, ge=0)
 
     # --- HTTP / session security --------------------------------------------------------------
     session_cookie_name: str = "nuvexa_session"
@@ -81,6 +89,8 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     # Comma-separated Fernet keys; first key encrypts, all keys decrypt (rotation).
     token_encryption_keys: SecretStr | None = None
+    # HMAC key for tamper-evident audit events (≥ 32 bytes). Required in production.
+    audit_hmac_key: SecretStr | None = None
 
     # --- AI provider -------------------------------------------------------------------------
     llm_provider: LLMProvider = LLMProvider.HEURISTIC
@@ -150,6 +160,15 @@ class Settings(BaseSettings):
     def _lower_emails(cls, value: list[str]) -> list[str]:
         return [v.lower() for v in value]
 
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def _validate_origins(cls, value: list[str]) -> list[str]:
+        """Only bare `scheme://host[:port]` origins: no wildcard, `null`, path, credentials or other schemes."""
+        for origin in value:
+            if not _ORIGIN_RE.match(origin):
+                raise ValueError(f"CORS origin {origin!r} must be an exact origin like https://app.example.com")
+        return value
+
     @field_validator("app_base_url", "oauth_redirect_uri", "graph_base_url", "azure_devops_base_url")
     @classmethod
     def _validate_url(cls, value: str) -> str:
@@ -159,6 +178,11 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_combinations(self) -> Self:
         if self.app_env is AppEnv.PRODUCTION:
+            if self.audit_hmac_key is None or len(self.audit_hmac_key.get_secret_value()) < 32:
+                raise ValueError("AUDIT_HMAC_KEY (at least 32 characters) is required in production")
+            insecure = [o for o in self.cors_allowed_origins if not o.startswith("https://")]
+            if insecure:
+                raise ValueError(f"CORS origins must use https in production: {insecure}")
             if self.token_encryption_keys is None:
                 raise ValueError("TOKEN_ENCRYPTION_KEYS is required in production")
             if self.cookie_secure is False:

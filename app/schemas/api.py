@@ -425,6 +425,13 @@ class AuditEventOut(ApiModel):
     created_at: datetime
 
 
+class AuditIntegrityOut(BaseModel):
+    checked: int
+    tampered: list[uuid.UUID]
+    unsigned: list[uuid.UUID]
+    verified_at: datetime
+
+
 class FollowUpTaskOut(ApiModel):
     id: uuid.UUID
     title: str

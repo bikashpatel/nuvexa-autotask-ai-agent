@@ -18,6 +18,7 @@ from app.core.config import Settings, get_settings
 from app.db.session import Database
 from app.observability.logging import configure_logging, get_logger
 from app.observability.tracing import configure_tracing, instrument_app
+from app.services.audit import configure_audit_signing
 
 API_PREFIX = "/api/v1"
 log = get_logger(__name__)
@@ -27,6 +28,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     settings = settings or get_settings()
     configure_logging(settings.log_level, settings.log_format)
     configure_tracing(settings, f"{settings.otel_service_name}-api")
+    configure_audit_signing(settings.audit_hmac_key)
     db = database or Database(settings)
 
     @asynccontextmanager

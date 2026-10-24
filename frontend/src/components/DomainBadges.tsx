@@ -17,7 +17,7 @@ import {
 } from '@tabler/icons-react';
 
 import type { EmailCategory, Priority, Urgency } from '../api/types';
-import { categoryLabel, priorityLabel, URGENCY_LABELS } from '../lib/format';
+import { categoryLabel, humanize, priorityLabel, URGENCY_LABELS } from '../lib/format';
 
 const CATEGORY_ICONS: Record<EmailCategory, typeof IconBug> = {
   incident: IconFlame,
@@ -74,9 +74,10 @@ export function PriorityBadge({ priority, ...rest }: { priority: string | null |
 export function UrgencyBadge({ urgency, ...rest }: { urgency: Urgency | null | undefined } & BadgeProps) {
   if (!urgency) return null;
   const color = urgency === 'immediate' ? 'red' : urgency === 'high' ? 'orange' : 'gray';
+  const label = URGENCY_LABELS[urgency] ?? humanize(urgency);
   return (
-    <Badge variant="outline" color={color} aria-label={`Urgency: ${URGENCY_LABELS[urgency]}`} {...rest}>
-      Urgency: {URGENCY_LABELS[urgency] ?? urgency}
+    <Badge variant="outline" color={color} aria-label={`Urgency: ${label}`} {...rest}>
+      Urgency: {label}
     </Badge>
   );
 }

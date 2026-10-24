@@ -8,8 +8,18 @@ from pathlib import Path
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from app.core.config import Settings
+
+
+def checkpoint_serializer() -> JsonPlusSerializer:
+    """Strict msgpack allowlist: checkpoints never instantiate arbitrary classes on load.
+
+    Graph state holds only primitives, so nothing beyond LangGraph's built-in safe types is needed; a
+    row written by an attacker into the checkpoint tables cannot turn into code execution.
+    """
+    return JsonPlusSerializer(allowed_msgpack_modules=None)
 
 
 def _postgres_conninfo(database_url: str) -> str:
@@ -40,19 +50,21 @@ async def open_checkpointer(settings: Settings) -> AsyncIterator[BaseCheckpointS
         )
         await pool.open()
         try:
-            saver = AsyncPostgresSaver(pool)  # type: ignore[arg-type]
+            saver = AsyncPostgresSaver(pool, serde=checkpoint_serializer())  # type: ignore[arg-type]
             await saver.setup()
             yield saver
         finally:
             await pool.close()
     elif settings.database_url.startswith("sqlite"):
+        import aiosqlite
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-        async with AsyncSqliteSaver.from_conn_string(_sqlite_checkpoint_path(settings.database_url)) as sqlite_saver:
+        async with aiosqlite.connect(_sqlite_checkpoint_path(settings.database_url)) as conn:
+            sqlite_saver = AsyncSqliteSaver(conn, serde=checkpoint_serializer())
             await sqlite_saver.setup()
             yield sqlite_saver
     else:  # pragma: no cover - unsupported URL schemes fail elsewhere first
-        yield InMemorySaver()
+        yield InMemorySaver(serde=checkpoint_serializer())
 
 
 async def setup_checkpointer(settings: Settings) -> None:

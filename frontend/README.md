@@ -31,6 +31,7 @@ With the API in demo mode (`DEMO_MODE=true`), the login page offers demo persona
 | `npm run typecheck`               | `tsc -b` (app + node configs)                                                           |
 | `npm test`                        | Vitest (jsdom), single run                                                              |
 | `npm run test:watch`              | Vitest watch mode                                                                       |
+| `npm run test:coverage`           | Vitest + V8 coverage (text, `lcov`, `json-summary` → `coverage/`); thresholds enforced  |
 | `npm run format` / `format:check` | Prettier                                                                                |
 
 ## Structure
@@ -74,6 +75,7 @@ Exact versions are pinned in `package.json` (no ranges) and `package-lock.json` 
 | @tabler/icons-react · dayjs                       | 3.49.0 · 1.11.23                                                                                    |
 | ESLint · typescript-eslint · react-hooks plugin   | 10.13.0 · 8.72.0 · 7.1.1                                                                            |
 | Vitest · jsdom · Testing Library (react)          | 5.0.5 · 30.1.3 · 16.3.3                                                                             |
+| @vitest/coverage-v8 · axe-core                    | 5.0.5 (matches Vitest exactly) · 4.14.0                                                             |
 | **TypeScript**                                    | **6.0.3** (see below)                                                                               |
 | Node (build image)                                | 24.22.1 (React Router 8 needs ≥ 22.22)                                                              |
 
@@ -156,19 +158,64 @@ immutable`; `index.html` and routes are `no-cache`; `/healthz` for probes; dotfi
 
 ## Tests
 
-Vitest + Testing Library with a route-based `fetch` mock (`src/test/utils.tsx`); no backend needed.
+Vitest 5 + Testing Library (jsdom). Every module in `src/` has a co-located `*.test.ts(x)`; no
+backend or network is needed. `npm run test:coverage` enforces the coverage thresholds.
 
-- `api/client.test.ts` — CSRF header on unsafe methods only, request ids, error parsing, 422 field
-  errors, 401 redirect (and opt-out), network errors, query building, safe redirects.
-- `features/actions/ActionCard.test.tsx` — approve flow (disabled while pending, no optimistic
-  status, sends `version` + `payload_hash`), dirty form blocks approval, PATCH with
-  `expected_version` + invalidation notice, 409 reload banner, execute queued → polling → result
-  with a `mock://` URL rendered as text, permission-driven controls.
-- `features/actions/payloadForms.test.ts` — client validation mirroring `app/schemas/actions.py`.
-- `components/InjectionWarning.test.tsx` — prominent warning, excerpts rendered as inert text.
-- `theme/status.test.tsx` — status colour/label mapping, in-flight detection, `StatusBadge`.
-- `features/pages.smoke.test.tsx` and `routes/app.test.tsx` — every page renders against realistic
-  payloads; 401 → login redirect; authenticated shell.
+**Tooling**
+
+- **Fetch mock at the client boundary.** `mockFetch(routes)` in `src/test/utils.tsx` records every
+  request (method, URL, headers, JSON body) and fails unmatched requests loudly with HTTP 599.
+  Helpers: `errorResponse(status, code, …)` (API error schema with a correlation id), `callsTo`,
+  `queryOf` (repeated query params), `deferred` (keep a request in flight), `createWrapper` (for
+  `renderHook`), and `renderWithProviders(ui, { session, path, route, withNotifications, extraRoutes })`,
+  which returns the memory `router` for navigation assertions.
+- **Fixtures** (`src/test/fixtures.ts`) follow `app/schemas/api.py` exactly. They include personas whose
+  permission sets mirror `app/services/authz.py` (`PERSONAS.viewer/member/approver/admin`) and
+  hostile strings (`XSS_IMG`, `XSS_SCRIPT`).
+- **Fake timers** drive everything time-based: 2 s polling, the 120 s queued-job watch, 350 ms
+  search debounce, the 3 s/8 s post-sync refresh, 15 s/30 s list refreshes. No test waits on real
+  time.
+- **Accessibility.** `axe-core` (`src/test/axe.ts`, `expectNoSeriousA11yViolations`) runs on every
+  page and shared component, in idle, loading, error and open-dialog states. Any `serious` or
+  `critical` violation fails the test. `color-contrast` is disabled because jsdom does no layout.
+  Queries are role-based with accessible names. Tests also cover dialog focus trap and Escape, and
+  keyboard activation.
+- **Contract test** (`src/api/contract.test.ts`) compares every enum, status map and label map
+  with a snapshot of `app/domain/enums.py`. When the repository is checked out, it also compares
+  them with the live file (and `Perm` with `app/services/authz.py`).
+
+**Guarantees covered by tests**
+
+- **Client:** every endpoint function in `endpoints.ts` is checked for:
+  - method and exact URL (encoded ids);
+  - query params, including repeated `status`;
+  - JSON body;
+  - `X-CSRF-Token` on unsafe methods only, and `X-Request-ID` on every request;
+  - `skipAuthRedirect` for the health and auth endpoints;
+  - error mapping to `ApiError`: code, message, correlation id, field errors.
+- **401:** the user is sent to `/login?redirect_to=<path+search>`, so they return to the same page.
+  Hostile `redirect_to` values fall back to `/`.
+- **No optimistic writes:** approve, reject, cancel, execute, reconcile, save, task status,
+  disconnect and demo sign-in each keep the shown state until the mocked server answers. Buttons are
+  disabled while pending, and a double-click sends exactly one request.
+- **Approval binding:** approve and execute send exactly the displayed `version` + `payload_hash`.
+  After a `PATCH`, the save notice and the approval history show the invalidated approval, and
+  Execute is hidden until a new approval.
+- **Errors:**
+  - 409 `stale_version` shows a "changed — reload" banner with a reload button (actions and settings).
+  - 422 field errors are mapped onto the matching form fields; unknown fields are listed.
+  - Other errors show a toast with the code and support reference.
+- **Untrusted content:** HTML and script strings are injected into email bodies, AI rationale,
+  evidence, references, drafts, audit details and titles. Tests assert that no element is created
+  and the text stays visible.
+- **Links:**
+  - `mock://` and other non-http(s) URLs are never links.
+  - External links use `target="_blank" rel="noopener noreferrer"`.
+  - References copied from email are never clickable.
+- **Permissions:**
+  - Per-action `permissions` flags drive each control.
+  - The viewer persona sees no mutating controls.
+  - Settings are read-only for non-admins.
 
 ## Known gaps
 

@@ -549,7 +549,12 @@ class ExecutionService:
         return execution
 
 
+_CATEGORY_ALIASES = {"not_configured": FailureCategory.CONFIGURATION}
+
+
 def _category(value: str) -> FailureCategory:
+    if value in _CATEGORY_ALIASES:
+        return _CATEGORY_ALIASES[value]
     try:
         return FailureCategory(value)
     except ValueError:

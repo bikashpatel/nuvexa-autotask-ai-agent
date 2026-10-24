@@ -24,6 +24,7 @@ from app.db.models import ConnectedAccount, Job, WorkflowRun
 from app.db.session import Database
 from app.domain.enums import ConnectionProvider, ConnectionStatus, JobType
 from app.observability.logging import get_logger
+from app.services.audit import configure_audit_signing
 from app.services.email_sync_service import EmailSyncService
 from app.services.execution_service import ExecutionService
 from app.services.integration_clients import make_ado_client_factory
@@ -163,6 +164,9 @@ class Worker:
         try:
             while not self._stop.is_set():
                 await semaphore.acquire()
+                if self._stop.is_set():  # stop requested while waiting for a free slot: claim nothing new
+                    semaphore.release()
+                    break
                 try:
                     async with self.db.session() as s:
                         job = await queue.claim_next(s, self.worker_id)
@@ -249,6 +253,7 @@ class Worker:
 @asynccontextmanager
 async def worker_context(db: Database, settings: Settings) -> AsyncIterator[Worker]:
     """Builds the agent, execution service, checkpointer and workflow engine for a worker."""
+    configure_audit_signing(settings.audit_hmac_key)
     async with open_checkpointer(settings) as checkpointer:
         agent = build_analysis_agent(settings)
         deps = WorkflowDeps(

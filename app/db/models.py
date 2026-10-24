@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    DDL,
     Boolean,
     Float,
     ForeignKey,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -437,6 +439,45 @@ class AuditEvent(UUIDPrimaryKeyMixin, Base):
     ip_address: Mapped[str | None] = mapped_column(String(64))
     details: Mapped[dict[str, Any]] = mapped_column(default=dict)
     created_at: Mapped[datetime]
+    # HMAC-SHA256 over the event's content (app.services.audit.compute_audit_integrity): tamper evidence.
+    integrity_hash: Mapped[str | None] = mapped_column(String(64))
+
+
+# Append-only audit trail enforced by the database (see docs/SECURITY_CONTROLS.md). The same statements are
+# used by the Alembic migration; attaching them to the table also covers metadata.create_all (tests, demo).
+AUDIT_APPEND_ONLY_POSTGRES = [
+    """
+    CREATE OR REPLACE FUNCTION nuvexa_audit_events_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+        IF TG_OP = 'DELETE' AND coalesce(current_setting('nuvexa.audit_purge', true), '') = 'on' THEN
+            RETURN OLD;  -- retention purge (app.services.retention_service) sets this per transaction
+        END IF;
+        RAISE EXCEPTION 'audit_events is append-only (% blocked)', TG_OP USING ERRCODE = 'insufficient_privilege';
+    END;
+    $$
+    """,
+    """
+    CREATE TRIGGER audit_events_append_only BEFORE UPDATE OR DELETE ON audit_events
+    FOR EACH ROW EXECUTE FUNCTION nuvexa_audit_events_guard()
+    """,
+    """
+    CREATE TRIGGER audit_events_no_truncate BEFORE TRUNCATE ON audit_events
+    FOR EACH STATEMENT EXECUTE FUNCTION nuvexa_audit_events_guard()
+    """,
+]
+AUDIT_APPEND_ONLY_SQLITE = [
+    """
+    CREATE TRIGGER audit_events_no_update BEFORE UPDATE ON audit_events
+    BEGIN SELECT RAISE(ABORT, 'audit_events is append-only (UPDATE blocked)'); END
+    """,
+]
+# DDL() applies Python %-formatting to its text, so literal "%" (PL/pgSQL RAISE placeholders) is doubled here.
+for _statement in AUDIT_APPEND_ONLY_POSTGRES:
+    _ddl = DDL(_statement.replace("%", "%%")).execute_if(dialect="postgresql")  # type: ignore[no-untyped-call]
+    event.listen(AuditEvent.__table__, "after_create", _ddl)
+for _statement in AUDIT_APPEND_ONLY_SQLITE:
+    _ddl = DDL(_statement.replace("%", "%%")).execute_if(dialect="sqlite")  # type: ignore[no-untyped-call]
+    event.listen(AuditEvent.__table__, "after_create", _ddl)
 
 
 class AppSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):

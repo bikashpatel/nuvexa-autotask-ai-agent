@@ -1,10 +1,19 @@
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup } from '@testing-library/react';
+import { notifications } from '@mantine/notifications';
+import { cleanup, configure } from '@testing-library/react';
 import { afterEach, vi } from 'vitest';
+
+// Full page renders (Mantine + axe) are slower when every test file runs in a parallel worker on a
+// loaded CI machine: findBy*/waitFor get a bounded 3 s (default 1 s). Polling and debounce tests use
+// fake timers, so this never hides a real wait.
+configure({ asyncUtilTimeout: 3000 });
 
 afterEach(() => {
   cleanup();
+  // The notifications store is module-global: never leak toasts into the next test.
+  notifications.clean();
+  notifications.cleanQueue();
 });
 
 // jsdom gaps that Mantine relies on.
@@ -32,6 +41,9 @@ class ResizeObserverStub {
 if (!('ResizeObserver' in window)) {
   Object.defineProperty(window, 'ResizeObserver', { writable: true, value: ResizeObserverStub });
 }
+
+// axe-core probes <canvas> (icon-ligature checks); jsdom has no canvas backend and logs noise.
+HTMLCanvasElement.prototype.getContext = () => null;
 
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};

@@ -55,7 +55,7 @@ function OriginalEmail({ emailId }: { emailId: string }) {
       }
     >
       {email.isPending ? (
-        <Stack gap="xs" aria-busy="true" aria-label="Loading email">
+        <Stack gap="xs" role="status" aria-busy="true" aria-label="Loading email">
           <Skeleton height={14} />
           <Skeleton height={14} width="70%" />
           <Skeleton height={220} />

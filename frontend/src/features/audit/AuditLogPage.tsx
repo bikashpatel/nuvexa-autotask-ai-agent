@@ -16,7 +16,7 @@ import {
 import { useDebouncedValue } from '@mantine/hooks';
 import { IconChevronDown, IconChevronRight, IconFilterOff, IconHistory } from '@tabler/icons-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 
 import { auditApi } from '../../api/endpoints';
@@ -146,7 +146,12 @@ export function AuditLogPage() {
   const offset = Math.max(0, Number(params.get('offset') ?? 0) || 0);
   const currentEventType = params.get('event_type') ?? '';
 
+  // Only a *new* debounced value is pushed into the URL; comparing against the URL alone would
+  // re-apply the stale value when the URL changes first (e.g. "Clear filters").
+  const pushedEventType = useRef(debouncedEventType);
   useEffect(() => {
+    if (debouncedEventType === pushedEventType.current) return;
+    pushedEventType.current = debouncedEventType;
     if (debouncedEventType === currentEventType) return;
     setParams(
       (prev) => {

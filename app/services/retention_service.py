@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -33,6 +33,9 @@ async def purge_tenant(session: AsyncSession, tenant_id: uuid.UUID, settings: Se
             WorkflowEvent.created_at < now - timedelta(days=ts.retention.workflow_event_days),
         )
     )
+    if (await session.connection()).dialect.name == "postgresql":
+        # The append-only trigger on audit_events only allows deletes inside an explicit retention purge.
+        await session.execute(text("SELECT set_config('nuvexa.audit_purge', 'on', true)"))
     audits = await session.execute(
         delete(AuditEvent).where(
             AuditEvent.tenant_id == tenant_id,

@@ -21,7 +21,12 @@ export function ConfirmModal({
   loading?: boolean;
 }) {
   return (
-    <Modal opened={opened} onClose={loading ? () => undefined : onClose} title={title}>
+    <Modal
+      opened={opened}
+      onClose={loading ? () => undefined : onClose}
+      title={title}
+      closeButtonProps={{ 'aria-label': 'Close dialog', disabled: loading }}
+    >
       <Stack gap="md">
         {typeof children === 'string' ? <Text size="sm">{children}</Text> : children}
         <Group justify="flex-end" gap="sm">

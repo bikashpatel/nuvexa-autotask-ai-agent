@@ -38,7 +38,9 @@ async def list_emails(
     require(actor, Perm.EMAIL_READ, resource_type="email")
     stmt = visible(select(EmailMessage), EmailMessage, actor).where(EmailMessage.deleted_at.is_(None))
     if q:
-        pattern = f"%{q.replace('%', r'\%').replace('_', r'\_')}%"
+        # Escape the escape character first, then the LIKE wildcards: the search is always literal.
+        literal = q.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        pattern = f"%{literal}%"
         stmt = stmt.where(
             or_(
                 EmailMessage.subject.ilike(pattern, escape="\\"),

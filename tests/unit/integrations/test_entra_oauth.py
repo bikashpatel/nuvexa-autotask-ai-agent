@@ -11,8 +11,11 @@ from app.domain.enums import FailureCategory
 from app.integrations.microsoft_graph.base import GRAPH_LOGIN_SCOPES, GRAPH_MAIL_SCOPES
 from app.integrations.microsoft_graph.oauth import EntraOAuthClient, clean_scopes
 from tests.conftest import make_settings
+from tests.support.entra_tokens import msal_nonce_claim, sign_id_token, test_validator
 
 TENANT = "11111111-1111-1111-1111-111111111111"
+CLIENT_ID = "00000000-0000-0000-0000-000000000001"
+AUTHORITY_HOST = "https://login.microsoftonline.com"
 OID = "22222222-2222-2222-2222-222222222222"
 HOME = f"{OID}.{TENANT}"
 
@@ -65,6 +68,16 @@ class FakeApp:
         self.cache.state = '{"RefreshToken": {"x": {"secret": "fake-refresh-token"}}}'
         self.cache.has_state_changed = True
         result: dict[str, Any] = self.script["token_result"]
+        claims = result.get("id_token_claims")
+        if isinstance(claims, dict) and "id_token" not in result:
+            # Microsoft returns the raw, signed ID token; EntraOAuthClient verifies it before trusting claims.
+            token = sign_id_token(
+                claims,
+                client_id=CLIENT_ID,
+                authority_host=AUTHORITY_HOST,
+                nonce=msal_nonce_claim(auth_code_flow.get("nonce")),
+            )
+            result = {**result, "id_token": token}
         return result
 
     def get_accounts(self, username: str | None = None) -> list[dict[str, Any]]:
@@ -82,18 +95,19 @@ class FakeApp:
 def make_client(database_url: str, script: dict[str, Any], **overrides: Any) -> EntraOAuthClient:
     settings = make_settings(
         database_url,
-        entra_client_id="00000000-0000-0000-0000-000000000001",
+        entra_client_id=CLIENT_ID,
         entra_client_secret="not-a-real-secret",
         oauth_redirect_uri="http://localhost:5173/api/v1/auth/callback",
         **overrides,
     )
-    return EntraOAuthClient(settings, app_factory=lambda cache: FakeApp(cache, script))
+    return EntraOAuthClient(
+        settings, app_factory=lambda cache: FakeApp(cache, script), id_token_validator=test_validator(settings)
+    )
 
 
 SUCCESS = {
     "access_token": "fake-access-token",
     "refresh_token": "fake-refresh-token",
-    "id_token": "fake.id.token",
     "client_info": client_info(OID, TENANT),
     "scope": "Mail.Read User.Read openid profile email",
     "id_token_claims": {

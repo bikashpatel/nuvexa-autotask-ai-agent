@@ -59,7 +59,10 @@ def _is_sensitive_key(key: str) -> bool:
 
 def _redact_processor(_logger: Any, _method: str, event_dict: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
     for key in list(event_dict.keys()):
-        if key in {"event", "level", "timestamp", "logger"}:
+        if key in {"level", "timestamp", "logger"}:
+            continue
+        if key == "event":  # message text (e.g. from stdlib/library loggers) is scrubbed by value, never dropped
+            event_dict[key] = redact_value(event_dict[key])
             continue
         event_dict[key] = REDACTED if _is_sensitive_key(key) else redact_value(event_dict[key])
     return event_dict

@@ -19,7 +19,7 @@ import { DateTimePicker } from '@mantine/dates';
 import { useForm, type UseFormReturnType } from '@mantine/form';
 import { IconChecks, IconPlus, IconTrash } from '@tabler/icons-react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useState, type ReactNode } from 'react';
+import { useId, useRef, useState, type ReactNode } from 'react';
 
 import { isApiError, type ApiError } from '../../api/client';
 import { integrationsApi } from '../../api/endpoints';
@@ -96,11 +96,21 @@ function useActionEditor<V extends object>(
   const update = useUpdateAction(action.id);
   const [generalErrors, setGeneralErrors] = useState<string[]>([]);
 
-  const save = form.onSubmit((values) => {
+  // Synchronous single-flight: a second click before the re-render must not PATCH the same
+  // expected_version twice (the duplicate would come back 409 and show a false conflict).
+  const saveInFlight = useRef(false);
+
+  const save = () => {
+    if (saveInFlight.current) return;
+    if (form.validate().hasErrors) return;
+    saveInFlight.current = true;
     setGeneralErrors([]);
     update.mutate(
-      { expectedVersion: action.version, payload: toPayload(values) },
+      { expectedVersion: action.version, payload: toPayload(form.getValues()) },
       {
+        onSettled: () => {
+          saveInFlight.current = false;
+        },
         onSuccess: (next) => onSaved(action, next),
         onError: (error) => {
           if (isApiError(error) && error.isStaleVersion) {
@@ -120,7 +130,7 @@ function useActionEditor<V extends object>(
         },
       },
     );
-  });
+  };
 
   const controls = (
     <ActionControls
@@ -128,7 +138,7 @@ function useActionEditor<V extends object>(
       dirty={form.isDirty()}
       editable={props.editable}
       saving={update.isPending}
-      onSave={() => save()}
+      onSave={save}
       onDiscard={() => {
         form.reset();
         setGeneralErrors([]);
@@ -454,6 +464,20 @@ export function ReplyEditor(props: EditorProps) {
 
 // --- Follow-up task ------------------------------------------------------------------------------
 
+// Mantine's picker controls (clear ×, month navigation, submit ✓) are icon-only without names.
+const DUE_DATE_CLEAR_PROPS = { 'aria-label': 'Clear due date' };
+const DUE_DATE_SUBMIT_PROPS = { 'aria-label': 'Apply due date' };
+const DUE_DATE_ARIA_LABELS = {
+  previousMonth: 'Previous month',
+  nextMonth: 'Next month',
+  previousYear: 'Previous year',
+  nextYear: 'Next year',
+  previousDecade: 'Previous decade',
+  nextDecade: 'Next decade',
+  monthLevelControl: 'Choose month',
+  yearLevelControl: 'Choose year',
+};
+
 export function FollowUpEditor(props: EditorProps) {
   const original = props.action.payload as Partial<FollowUpTaskPayload>;
   const { form, controls, generalErrors } = useActionEditor<FollowUpFormValues>(
@@ -462,6 +486,9 @@ export function FollowUpEditor(props: EditorProps) {
     validateFollowUp,
     (values) => followUpToPayload(values, original),
   );
+  // Mantine labels the picker dropdown by the popover's own id, which differs from the input id
+  // (unnamed dialog). Sharing one id makes the dropdown's aria-labelledby resolve to the input.
+  const dueDateId = useId();
   return (
     <EditorShell editable={props.editable} generalErrors={generalErrors} controls={controls}>
       <TextInput
@@ -482,6 +509,11 @@ export function FollowUpEditor(props: EditorProps) {
         label="Due date"
         placeholder="No due date"
         clearable
+        id={dueDateId}
+        popoverProps={{ id: dueDateId }}
+        clearButtonProps={DUE_DATE_CLEAR_PROPS}
+        ariaLabels={DUE_DATE_ARIA_LABELS}
+        submitButtonProps={DUE_DATE_SUBMIT_PROPS}
         valueFormat="MMM D, YYYY HH:mm"
         {...form.getInputProps('due_at')}
         onChange={(value) => form.setFieldValue('due_at', value ? String(value) : null)}

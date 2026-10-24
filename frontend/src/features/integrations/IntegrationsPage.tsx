@@ -559,7 +559,7 @@ export function IntegrationsPage() {
         description="Connections NUVEXA uses to read email, write approved work and analyze content. Credentials never reach the browser."
       />
       {integrations.isPending ? (
-        <Stack gap="md" aria-busy="true" aria-label="Loading integrations">
+        <Stack gap="md" role="status" aria-busy="true" aria-label="Loading integrations">
           <Skeleton height={220} />
           <Skeleton height={220} />
         </Stack>

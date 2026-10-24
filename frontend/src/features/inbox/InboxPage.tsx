@@ -24,7 +24,7 @@ import {
   IconSparkles,
 } from '@tabler/icons-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 
 import { emailsApi } from '../../api/endpoints';
@@ -90,7 +90,8 @@ function EmailRow({
     <Table.Tr>
       <Table.Td maw={220}>
         <Text size="sm" fw={email.is_read ? 400 : 650} truncate>
-          {email.sender_name ?? email.sender_address ?? 'Unknown sender'}
+          {/* `||`: Graph can return an empty display name, which must fall back to the address. */}
+          {email.sender_name || email.sender_address || 'Unknown sender'}
         </Text>
         {email.sender_name && email.sender_address ? (
           <Text size="xs" c="dimmed" truncate>
@@ -201,8 +202,13 @@ export function InboxPage() {
   };
 
   // Push the debounced search box into the URL (the URL is the source of truth for filters).
+  // Only a *new* debounced value is pushed: comparing against the URL alone would re-apply the
+  // stale value whenever the URL changes first (e.g. "Clear filters" before the debounce settles).
   const currentQ = params.get('q') ?? '';
+  const pushedSearch = useRef(debouncedSearch);
   useEffect(() => {
+    if (debouncedSearch === pushedSearch.current) return;
+    pushedSearch.current = debouncedSearch;
     if (debouncedSearch === currentQ) return;
     setParams(
       (prev) => {

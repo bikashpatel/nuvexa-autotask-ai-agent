@@ -133,6 +133,7 @@ export function OverviewPage() {
         <SimpleGrid
           cols={{ base: 1, xs: 2, md: 3, xl: 6 }}
           spacing="md"
+          role="status"
           aria-busy="true"
           aria-label="Loading KPIs"
         >

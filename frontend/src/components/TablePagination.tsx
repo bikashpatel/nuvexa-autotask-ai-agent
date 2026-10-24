@@ -15,8 +15,10 @@ export function TablePagination({
 }) {
   const pages = Math.max(1, Math.ceil(total / limit));
   const page = Math.min(pages, Math.floor(offset / limit) + 1);
-  const from = total === 0 ? 0 : offset + 1;
-  const to = Math.min(total, offset + limit);
+  // An offset at/after the end (stale or hand-edited URL) is an empty page, not "501–60 of 60".
+  const empty = total === 0 || offset >= total;
+  const from = empty ? 0 : offset + 1;
+  const to = empty ? 0 : Math.min(total, offset + limit);
   return (
     <Group justify="space-between" mt="md" gap="sm" wrap="wrap">
       <Text size="sm" c="dimmed" className="nuvexa-tabular" aria-live="polite">

@@ -45,7 +45,9 @@ ENV API_UPSTREAM=http://api:8000 \
 COPY --chown=nginx:root nginx.conf /etc/nginx/templates/default.conf.template
 
 USER root
-RUN rm -rf /usr/share/nginx/html/*
+# Security: pick up Alpine security fixes published after the base image was built (Trivy gate in CI).
+RUN apk upgrade --no-cache \
+ && rm -rf /usr/share/nginx/html/*
 COPY --from=build --chown=nginx:root /app/dist /usr/share/nginx/html
 USER nginx
 

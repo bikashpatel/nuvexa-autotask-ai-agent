@@ -55,8 +55,9 @@ def normalize_text(value: str) -> str:
     """NFKC-normalize, remove invisible/control characters, and collapse excessive blank lines."""
     value = unicodedata.normalize("NFKC", value)
     value = _INVISIBLE_RE.sub("", value)
-    value = "".join(ch for ch in value if ch in "\n\t" or unicodedata.category(ch)[0] != "C")
+    # Line endings first: "\r" is a control character and would otherwise be dropped, joining lines.
     value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = "".join(ch for ch in value if ch in "\n\t" or unicodedata.category(ch)[0] != "C")
     value = _TRAILING_WS_RE.sub("\n", value)
     return _MULTI_BLANK_RE.sub("\n\n", value).strip()
 

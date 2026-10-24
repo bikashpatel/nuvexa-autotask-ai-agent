@@ -177,7 +177,12 @@ function TasksTab() {
         aria-label="Task status"
       />
       {tasks.isPending ? (
-        <SimpleGrid cols={{ base: 1, md: 2, xl: 3 }}>
+        <SimpleGrid
+          cols={{ base: 1, md: 2, xl: 3 }}
+          role="status"
+          aria-busy="true"
+          aria-label="Loading tasks"
+        >
           {Array.from({ length: 3 }, (_, i) => (
             <Skeleton key={i} height={160} />
           ))}
@@ -296,7 +301,9 @@ function DraftsTab() {
         yourself.
       </Alert>
       {drafts.isPending ? (
-        <Skeleton height={200} />
+        <Stack role="status" aria-busy="true" aria-label="Loading reply drafts">
+          <Skeleton height={200} />
+        </Stack>
       ) : drafts.isError ? (
         <ErrorState error={drafts.error} onRetry={() => void drafts.refetch()} retrying={drafts.isFetching} />
       ) : drafts.data.total === 0 ? (

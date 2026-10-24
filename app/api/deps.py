@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Coroutine
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,12 +65,23 @@ async def get_actor(request: Request, resolved: ResolvedSessionDep) -> Actor:
 ActorDep = Annotated[Actor, Depends(get_actor)]
 
 
-def rate_limit(name: str, limit: int, window_seconds: float = 60) -> Callable[..., Coroutine[Any, Any, None]]:
-    async def _check(request: Request, settings: SettingsDep) -> None:
+def rate_limit(
+    name: str, limit: int, window_seconds: float = 60, *, per: Literal["user", "ip"] = "user"
+) -> Callable[..., Coroutine[Any, Any, None]]:
+    """In-process sliding-window limit. Buckets are keyed by the *verified* user (valid session) or by client
+    IP — never by an unverified cookie value, which a client could rotate to get fresh buckets. Sign-in
+    routes use `per="ip"` so failed or repeated logins are throttled per client regardless of session."""
+
+    async def _check(request: Request, settings: SettingsDep, session: SessionDep) -> None:
         if not settings.rate_limit_enabled:
             return
         limiter: SlidingWindowRateLimiter = request.app.state.rate_limiter
-        identity = request.cookies.get(settings.session_cookie_name, "")[:16] or (client_ip(request) or "anon")
+        identity = f"ip:{client_ip(request) or 'unknown'}"
+        token = request.cookies.get(settings.session_cookie_name)
+        if per == "user" and token:
+            resolved = await SessionService(settings).resolve(session, token)
+            if resolved is not None:
+                identity = f"user:{resolved.user.id}"
         if not limiter.allow(f"{name}:{identity}", limit, window_seconds):
             raise RateLimited()
 

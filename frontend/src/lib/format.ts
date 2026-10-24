@@ -162,5 +162,6 @@ export function actionTypeLabel(value: string | null | undefined): string {
 
 export function personLabel(name: string | null | undefined, address: string | null | undefined): string {
   if (name && address) return `${name} <${address}>`;
-  return name ?? address ?? 'Unknown sender';
+  // `||`, not `??`: Graph can return an empty display name, which must fall back to the address.
+  return name || address || 'Unknown sender';
 }

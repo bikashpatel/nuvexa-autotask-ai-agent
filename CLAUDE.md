@@ -11,6 +11,8 @@ uv sync                                   # install (uses uv.lock)
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app
 uv run pytest                             # SQLite, mocks, heuristic agent — no network, no paid calls
+uv run pytest tests/security              # security regression suite
+scripts/e2e.sh                            # system E2E against an isolated Docker Compose stack
 TEST_DATABASE_URL=postgresql+psycopg://nuvexa:nuvexa@localhost:5432/nuvexa_test uv run pytest  # PostgreSQL
 uv run alembic upgrade head
 uv run nuvexa api | worker | demo         # see app/cli.py
@@ -46,6 +48,12 @@ adapters · `app/repositories` tenant-scoped queries · `app/workers` job queue 
 8. **No chain-of-thought storage.** Store concise rationales, evidence quotes and operational traces only.
 9. **Every status change goes through `app/domain/state_machine.py`** and emits an audit event for
    approvals, rejections, permission failures and external writes.
+10. **Audit events are append-only and HMAC-signed.** Only `record_audit` creates them; never update or
+    delete rows (PostgreSQL triggers enforce it; retention purge is the only sanctioned delete).
+11. **Trust only verified identity claims.** Sign-in uses `IdTokenValidator` (signature, iss, aud, exp,
+    tenant, nonce); never read MSAL's unverified `id_token_claims`.
+12. **TDD:** write the failing test first (see `docs/TESTING_STRATEGY.md`); security changes need negative
+    authorization tests in `tests/security/`.
 
 ## Conventions
 

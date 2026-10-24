@@ -66,7 +66,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="nuvexa", description="NUVEXA-AutoTask-AI-Agent")
     sub = parser.add_subparsers(dest="command", required=True)
     api = sub.add_parser("api", help="Run the HTTP API")
-    api.add_argument("--host", default="0.0.0.0")  # noqa: S104 — container entrypoint
+    # Local runs listen on loopback only; containers pass --host 0.0.0.0 explicitly (Dockerfile/compose).
+    api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8000)
     api.add_argument("--reload", action="store_true")
     sub.add_parser("worker", help="Run the background worker")

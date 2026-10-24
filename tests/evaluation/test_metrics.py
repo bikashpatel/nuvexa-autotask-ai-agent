@@ -160,3 +160,37 @@ def test_percentile_nearest_rank() -> None:
     assert percentile(values, 95) == 95.0
     assert percentile([3.0], 95) == 3.0
     assert percentile([], 50) is None
+
+
+def test_field_correctness_edge_cases() -> None:
+    from app.evaluation.metrics import _field_correct
+
+    null_product = ExpectedOutcome.model_validate(
+        {**expected().model_dump(mode="json", exclude_unset=True), "product_or_system_contains": None}
+    )
+    assert _field_correct(outcome(null_product), "product_or_system_contains") is True
+    assert _field_correct(outcome(null_product, product_or_system="portal"), "product_or_system_contains") is False
+    assert _field_correct(outcome(expected(environment="production"), environment="Production EU"), "environment")
+    assert not _field_correct(outcome(expected(environment="production")), "environment")
+    assert _field_correct(outcome(expected(requester_email="A@x.org"), requester_email="a@X.org"), "requester_email")
+    with pytest.raises(ValueError, match="bogus"):
+        _field_correct(outcome(expected()), "bogus")
+
+
+def test_summary_aggregates_cost_tokens_and_splits() -> None:
+    from app.evaluation.metrics import summarize_by_split
+
+    outcomes = [
+        outcome(expected(), split="dev", input_tokens=10, output_tokens=2, estimated_cost_usd=0.001, latency_ms=5.0),
+        outcome(expected(), split="holdout", input_tokens=4, output_tokens=1, latency_ms=7.0),
+        outcome(expected(), split="holdout", error="agent_error: x", latency_ms=999.0),
+    ]
+    summary = summarize(outcomes)
+    assert summary["errors"] == 1
+    assert summary["tokens"] == {"input": 14, "output": 3, "total": 17}
+    assert summary["estimated_cost_usd"] == 0.001
+    assert summary["latency_ms"] == {"p50": 5.0, "p95": 7.0}  # failed cases are excluded
+    by_split = summarize_by_split(outcomes)
+    assert list(by_split) == ["dev", "holdout"]
+    assert by_split["holdout"]["cases"] == 2
+    assert macro_f1({}) is None

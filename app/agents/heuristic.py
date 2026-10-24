@@ -555,7 +555,8 @@ def _confidence(category: EmailCategory, top: float, second: float) -> float:
 def _priority_and_urgency(category: EmailCategory, analysis: _Analysis) -> tuple[Priority, Urgency, list[str]]:
     text = analysis.text
     prod = analysis.environment == "production"
-    urgent = bool(_URGENT_RE.search(text))
+    # Low-urgency phrases are removed first so that "not urgent" does not count as urgency wording.
+    urgent = bool(_URGENT_RE.search(_LOW_RE.sub(" ", text)))
     low = bool(_LOW_RE.search(text))
     severe = bool(_SEVERE_RE.search(text))
     broad = bool(_BROAD_RE.search(text))

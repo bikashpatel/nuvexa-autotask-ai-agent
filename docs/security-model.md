@@ -1,5 +1,8 @@
 # Security model
 
+> Audit findings and remediation: `docs/SECURITY_AUDIT.md`. Control catalogue with test references:
+> `docs/SECURITY_CONTROLS.md`.
+
 ## Assets
 
 | Asset | Where | Protection |
@@ -10,6 +13,7 @@
 | Session tokens | cookie; SHA-256 hash in `user_sessions` | HttpOnly, Secure, SameSite=Lax, idle + absolute expiry |
 | Email content | `email_messages.body_text` | Tenant-scoped; not logged; retention purge |
 | Approval integrity | `action_approvals` | Bound to action version + SHA-256 payload hash |
+| Audit trail | `audit_events` | Append-only (DB triggers) + per-event HMAC (`AUDIT_HMAC_KEY`) |
 
 ## Trust boundaries
 

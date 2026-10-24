@@ -14,7 +14,7 @@ from app.observability.logging import get_logger
 
 log = get_logger("app.http")
 
-_SECURITY_HEADERS = [
+SECURITY_HEADERS = [
     (b"x-content-type-options", b"nosniff"),
     (b"x-frame-options", b"DENY"),
     (b"referrer-policy", b"strict-origin-when-cross-origin"),
@@ -44,7 +44,7 @@ class CorrelationIdMiddleware:
                 hdrs = list(message.get("headers", []))
                 hdrs.append((b"x-request-id", cid.encode("latin-1")))
                 existing = {k.lower() for k, _ in hdrs}
-                hdrs.extend(h for h in _SECURITY_HEADERS if h[0] not in existing)
+                hdrs.extend(h for h in SECURITY_HEADERS if h[0] not in existing)
                 message["headers"] = hdrs
             await send(message)
 

@@ -6,6 +6,7 @@ import uuid
 
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import AzureDevOpsMode, Settings
@@ -35,14 +36,20 @@ def default_tenant_settings(settings: Settings) -> TenantSettings:
 
 
 async def load_settings_row(session: AsyncSession, tenant_id: uuid.UUID, settings: Settings) -> AppSettings:
-    row = (await session.execute(select(AppSettings).where(AppSettings.tenant_id == tenant_id))).scalar_one_or_none()
-    if row is None:
-        row = AppSettings(
-            tenant_id=tenant_id, settings=default_tenant_settings(settings).model_dump(mode="json"), version=1
-        )
-        session.add(row)
-        await session.flush()
-    return row
+    stmt = select(AppSettings).where(AppSettings.tenant_id == tenant_id)
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    if row is not None:
+        return row
+    candidate = AppSettings(
+        tenant_id=tenant_id, settings=default_tenant_settings(settings).model_dump(mode="json"), version=1
+    )
+    try:
+        async with session.begin_nested():  # savepoint: a lost race must not abort the caller's transaction
+            session.add(candidate)
+    except IntegrityError:
+        # Another transaction created the tenant's settings first; use the committed row.
+        return (await session.execute(stmt)).scalar_one()
+    return candidate
 
 
 async def get_tenant_settings(session: AsyncSession, tenant_id: uuid.UUID, settings: Settings) -> TenantSettings:

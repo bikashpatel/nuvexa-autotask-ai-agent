@@ -9,6 +9,8 @@ import httpx
 import pytest
 
 from app.core.config import Settings
+from app.db.models import ConnectedAccount
+from app.domain.enums import ConnectionProvider
 from app.integrations.azure_devops.mock import MockAzureDevOpsClient
 from tests.conftest import make_settings
 
@@ -84,3 +86,19 @@ def _reset_mock_ado() -> Iterator[None]:
     MockAzureDevOpsClient.reset()
     yield
     MockAzureDevOpsClient.reset()
+
+
+@pytest.fixture
+async def account(session: Any, tenant: Any, make_user: Any) -> ConnectedAccount:
+    """A connected Microsoft Graph account row (for credential-store tests)."""
+    user = await make_user(tenant)
+    acct = ConnectedAccount(
+        tenant_id=tenant.id,
+        user_id=user.id,
+        provider=ConnectionProvider.MICROSOFT_GRAPH,
+        external_account_id="oid-1.tid-1",
+        email="morgan@example.com",
+    )
+    session.add(acct)
+    await session.commit()
+    return acct

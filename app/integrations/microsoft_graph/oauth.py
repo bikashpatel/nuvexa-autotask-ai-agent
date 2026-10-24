@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping
@@ -21,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.core.config import Settings
 from app.core.errors import IntegrationError, IntegrationNotConfigured
 from app.domain.enums import FailureCategory
+from app.integrations.microsoft_graph.id_token import HttpJwksFetcher, IdTokenValidator
 from app.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -47,6 +49,17 @@ _TRANSIENT_ERRORS = frozenset({"temporarily_unavailable", "server_error"})
 
 # Discovery/metadata responses only (no tokens, no PII) — safe to share across application instances.
 _MSAL_HTTP_CACHE: dict[str, Any] = {}
+# Public signing keys (JWKS) per tenant, shared across EntraOAuthClient instances.
+_JWKS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _flow_nonce(flow: Mapping[str, Any]) -> str | None:
+    """The nonce claim expected in the ID token. MSAL keeps the raw nonce in the flow but sends its SHA-256
+    hex digest in the authorization request, so that digest is what Microsoft echoes back."""
+    nonce = flow.get("nonce")
+    if not isinstance(nonce, str) or not nonce:
+        return None
+    return hashlib.sha256(nonce.encode("ascii")).hexdigest()
 
 
 class MsalApplication(Protocol):
@@ -123,7 +136,8 @@ def map_msal_error(result: Mapping[str, Any], *, action: str) -> IntegrationErro
     """Turn an MSAL error dict into an `IntegrationError` without leaking descriptions or tokens."""
     error = result.get("error")
     code = error if isinstance(error, str) and _ERROR_CODE_RE.match(error) else "unknown_error"
-    aadsts = [c for c in result.get("error_codes") or [] if isinstance(c, int)][:3]
+    codes = result.get("error_codes")
+    aadsts = [c for c in codes if isinstance(c, int)][:3] if isinstance(codes, list) else []
     detail = f" (AADSTS{', AADSTS'.join(str(c) for c in aadsts)})" if aadsts else ""
     if code in _TRANSIENT_ERRORS:
         return IntegrationError(
@@ -144,9 +158,31 @@ def map_msal_error(result: Mapping[str, Any], *, action: str) -> IntegrationErro
 class EntraOAuthClient:
     """Async facade over MSAL for sign-in, mailbox consent and silent token acquisition."""
 
-    def __init__(self, settings: Settings, *, app_factory: MsalAppFactory | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        app_factory: MsalAppFactory | None = None,
+        id_token_validator: IdTokenValidator | None = None,
+    ) -> None:
         self._settings = settings
         self._app_factory = app_factory
+        self._id_token_validator = id_token_validator
+
+    @property
+    def id_token_validator(self) -> IdTokenValidator:
+        if self._id_token_validator is None:
+            self._id_token_validator = IdTokenValidator(
+                client_id=self._settings.entra_client_id or "",
+                authority_host=self._settings.entra_authority_host,
+                allowed_tenant_ids=self._settings.entra_allowed_tenant_ids,
+                jwks_fetcher=HttpJwksFetcher(
+                    self._settings.entra_authority_host,
+                    timeout_seconds=self._settings.graph_timeout_seconds,
+                    cache=_JWKS_CACHE,
+                ),
+            )
+        return self._id_token_validator
 
     # ------------------------------------------------------------------------------------------
     @property
@@ -245,7 +281,12 @@ class EntraOAuthClient:
                 raise IntegrationError("MSAL returned an invalid token response", category=FailureCategory.INTERNAL)
             if "error" in result:
                 raise map_msal_error(result, action="Sign-in failed")
-            return self._auth_result(result)
+            raw_id_token = result.get("id_token")
+            if not isinstance(raw_id_token, str) or not raw_id_token:
+                raise IntegrationError("Sign-in did not return an id token", category=FailureCategory.AUTHORIZATION)
+            # Never trust MSAL's unverified decode: signature, issuer, audience, lifetime and tenant are checked.
+            verified = await self.id_token_validator.validate(raw_id_token, nonce=_flow_nonce(flow))
+            return self._auth_result({**result, "id_token_claims": verified})
         except IntegrationError:
             cache.deserialize(snapshot)
             raise

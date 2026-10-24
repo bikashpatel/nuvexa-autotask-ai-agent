@@ -153,4 +153,5 @@ async def reanalyze(run_id: uuid.UUID, actor: ActorDep, session: SessionDep, set
 @router.post("/{run_id}/cancel", response_model=WorkflowRunOut)
 async def cancel(run_id: uuid.UUID, actor: ActorDep, session: SessionDep, settings: SettingsDep) -> WorkflowRunOut:
     run = await WorkflowService(settings).cancel(session, actor, run_id)
-    return run_out(run)
+    email = await session.get(EmailMessage, run.email_message_id)
+    return run_out(run, email.subject if email else None)

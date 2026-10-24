@@ -193,7 +193,7 @@ export function LoginPage() {
           ) : null}
 
           {config.isPending ? (
-            <Stack gap="sm" aria-busy="true" aria-label="Loading sign-in options">
+            <Stack gap="sm" role="status" aria-busy="true" aria-label="Loading sign-in options">
               <Skeleton height={44} />
               <Skeleton height={120} />
             </Stack>

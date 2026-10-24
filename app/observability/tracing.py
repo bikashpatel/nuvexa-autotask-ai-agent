@@ -67,7 +67,9 @@ def instrument_app(app: FastAPI, engine: AsyncEngine, settings: Settings) -> Non
 @contextmanager
 def start_span(name: str, attributes: dict[str, Any] | None = None) -> Iterator[Span]:
     """Start a span; attributes must already be sanitized (ids, counts, categories — no content)."""
-    with tracer.start_as_current_span(name) as span:
+    # The SDK defaults would export the exception message and stack trace (possibly email content or
+    # provider error text); only the exception type is recorded below.
+    with tracer.start_as_current_span(name, record_exception=False, set_status_on_exception=False) as span:
         for key, value in (attributes or {}).items():
             if value is not None:
                 span.set_attribute(key, value)

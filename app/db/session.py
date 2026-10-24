@@ -13,12 +13,25 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.core.config import Settings, get_settings
 
 
+def postgres_connect_args(settings: Settings) -> dict[str, Any]:
+    """Per-connection limits so a runaway query or lock wait cannot pin a worker or connection forever."""
+    options = (
+        f"-c statement_timeout={settings.database_statement_timeout_ms} "
+        f"-c lock_timeout={settings.database_lock_timeout_ms}"
+    )
+    return {"options": options}
+
+
 def create_engine(settings: Settings | None = None, url: str | None = None) -> AsyncEngine:
     settings = settings or get_settings()
     url = url or settings.database_url
     kwargs: dict[str, Any] = {"echo": settings.database_echo, "pool_pre_ping": True}
     if url.startswith("postgresql"):
-        kwargs.update(pool_size=settings.database_pool_size, max_overflow=settings.database_pool_size)
+        kwargs.update(
+            pool_size=settings.database_pool_size,
+            max_overflow=settings.database_pool_size,
+            connect_args=postgres_connect_args(settings),
+        )
     engine = create_async_engine(url, **kwargs)
     if url.startswith("sqlite"):
         _enable_sqlite_foreign_keys(engine.sync_engine)

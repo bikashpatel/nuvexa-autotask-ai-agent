@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.middleware import SECURITY_HEADERS
 from app.core.context import get_correlation_id
 from app.core.errors import AppError
 from app.observability.logging import get_logger
@@ -16,10 +17,11 @@ from app.services.authz import AuditedPermissionDenied
 log = get_logger(__name__)
 
 
-def _body(code: str, message: str, details: list[dict[str, object]] | None = None) -> dict[str, object]:
-    return {
-        "error": {"code": code, "message": message, "correlation_id": get_correlation_id(), "details": details or []}
-    }
+def _body(
+    code: str, message: str, details: list[dict[str, object]] | None = None, correlation_id: str | None = None
+) -> dict[str, object]:
+    cid = correlation_id or get_correlation_id()
+    return {"error": {"code": code, "message": message, "correlation_id": cid, "details": details or []}}
 
 
 def register_error_handlers(app: FastAPI) -> None:
@@ -48,6 +50,13 @@ def register_error_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=exc.status_code, content=_body(code, str(exc.detail)))
 
     @app.exception_handler(Exception)
-    async def _unhandled(_request: Request, exc: Exception) -> JSONResponse:
-        log.exception("unhandled_error", error_type=type(exc).__name__)
-        return JSONResponse(status_code=500, content=_body("internal_error", "An unexpected error occurred."))
+    async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+        # Starlette calls this from its outermost middleware, after CorrelationIdMiddleware has reset the context
+        # and bypassing its header wrapper: recover the request's id from the scope it stored it in.
+        cid = get_correlation_id() or getattr(request.state, "correlation_id", None)
+        log.exception("unhandled_error", error_type=type(exc).__name__, correlation_id=cid)
+        headers = {name.decode(): value.decode() for name, value in SECURITY_HEADERS}
+        if cid:
+            headers["x-request-id"] = cid
+        body = _body("internal_error", "An unexpected error occurred.", correlation_id=cid)
+        return JSONResponse(status_code=500, content=body, headers=headers)

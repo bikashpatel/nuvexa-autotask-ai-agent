@@ -71,21 +71,21 @@ async def auth_config(settings: SettingsDep) -> AuthConfigOut:
     )
 
 
-@router.post("/demo-login", response_model=MeOut, dependencies=[Depends(rate_limit("auth", 20))])
+@router.post("/demo-login", response_model=MeOut, dependencies=[Depends(rate_limit("auth", 20, per="ip"))])
 async def demo_login(
     body: DemoLoginRequest, request: Request, response: Response, session: SessionDep, settings: SettingsDep
 ) -> MeOut:
-    user = await DemoAuthService(settings).login(session, body.persona)
-    issued = await SessionService(settings).issue(
-        session, user, ip=client_ip(request), user_agent=request.headers.get("user-agent")
-    )
+    sessions = SessionService(settings)
+    await sessions.revoke_token(session, request.cookies.get(settings.session_cookie_name))
+    user = await DemoAuthService(settings).login(session, body.persona, ip=client_ip(request))
+    issued = await sessions.issue(session, user, ip=client_ip(request), user_agent=request.headers.get("user-agent"))
     await session.commit()
     set_session_cookies(response, settings, issued)
     tenant = await session.get(Tenant, user.tenant_id)
     return me_out(user, tenant.name if tenant else "")
 
 
-@router.get("/login", dependencies=[Depends(rate_limit("auth", 20))])
+@router.get("/login", dependencies=[Depends(rate_limit("auth", 20, per="ip"))])
 async def login(session: SessionDep, settings: SettingsDep, redirect_to: str | None = None) -> RedirectResponse:
     auth_uri, binding = await EntraAuthService(settings).begin(
         session, OAuthPurpose.LOGIN, redirect_to=redirect_to, user=None
@@ -107,7 +107,7 @@ def _redirect_with_binding(url: str, binding: str, settings: Settings) -> Redire
     return response
 
 
-@router.get("/callback", include_in_schema=True, dependencies=[Depends(rate_limit("auth", 30))])
+@router.get("/callback", include_in_schema=True, dependencies=[Depends(rate_limit("auth", 30, per="ip"))])
 async def oauth_callback(
     request: Request,
     session: SessionDep,

@@ -27,6 +27,7 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
   | 403 | `permission_denied`, `csrf_failed` |
   | 404 | `not_found` (also returned for resources in another tenant / not visible) |
   | 409 | `conflict`, `stale_version`, `invalid_state_transition`, `integration_not_configured` |
+  | 500 | `configuration_error` (e.g. Microsoft sign-in requested but Entra ID is not configured), `internal_error` |
   | 413 | `request_too_large` |
   | 422 | `validation_failed` (`details` lists field errors) |
   | 429 | `rate_limited` |
@@ -110,6 +111,7 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/audit-events` | `Page<AuditEventOut>`; filters `event_type`, `resource_type`, `resource_id`, `action_id`, `outcome` |
+| GET | `/audit-events/integrity` | approver/admin (`audit:read_all`) → `AuditIntegrityOut {checked, tampered[], unsigned[], verified_at}`: recomputes each event's HMAC |
 | GET | `/settings` | `SettingsOut` |
 | PUT | `/settings` | admin only; Body `SettingsUpdateRequest {expected_version, settings}` |
 | GET | `/dashboard/summary` | `DashboardSummaryOut` |
@@ -124,5 +126,9 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
 | approve/reject/execute **others'** actions | | | ✓ | ✓ |
 | change settings | | | | ✓ |
 
-`MeOut.permissions` lists: `email:read`, `email:sync`, `workflow:run`, `action:edit`,
+`MeOut.permissions` lists: `email:read`, `email:read_all`, `email:sync`, `workflow:run`, `action:edit`,
 `action:approve`, `action:execute`, `action:approve_any`, `audit:read_all`, `settings:write`.
+
+The Azure DevOps diagnostic endpoints (`/integrations/azure-devops/test|projects|…|validate`) use the
+service credentials and require `action:edit` (members and above). Rate limits are keyed by the verified
+user (authenticated routes) or client IP (sign-in routes).

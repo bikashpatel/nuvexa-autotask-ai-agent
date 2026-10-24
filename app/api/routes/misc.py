@@ -28,9 +28,11 @@ from app.domain.enums import (
     TaskStatus,
     WorkflowStatus,
 )
+from app.observability.logging import get_logger
 from app.repositories.scoping import get_visible, paginate, visible
 from app.schemas.api import (
     AuditEventOut,
+    AuditIntegrityOut,
     DashboardSummaryOut,
     FollowUpTaskOut,
     LLMUsageSummary,
@@ -41,11 +43,12 @@ from app.schemas.api import (
     TaskUpdateRequest,
 )
 from app.schemas.settings import TenantSettings
-from app.services.audit import record_audit
-from app.services.authz import Perm, require_owner_or
+from app.services.audit import record_audit, verify_tenant_audit_trail
+from app.services.authz import Perm, require, require_owner_or
 from app.services.settings_service import load_settings_row, update_tenant_settings
 
 router = APIRouter(tags=["workspace"])
+log = get_logger(__name__)
 
 Limit = Annotated[int, Query(ge=1, le=100)]
 Offset = Annotated[int, Query(ge=0)]
@@ -107,6 +110,18 @@ async def list_drafts(
     )
 
 
+@router.get("/audit-events/integrity", response_model=AuditIntegrityOut)
+async def verify_audit_integrity(actor: ActorDep, session: SessionDep) -> AuditIntegrityOut:
+    """Recompute every audit event's HMAC for the tenant; any mismatch means the stored row was altered."""
+    require(actor, Perm.AUDIT_READ_ALL, resource_type="audit")
+    report = await verify_tenant_audit_trail(session, actor.tenant_id)
+    if report.tampered:
+        log.error("audit_integrity_violation", tampered=len(report.tampered), tenant_id=str(actor.tenant_id))
+    return AuditIntegrityOut(
+        checked=report.checked, tampered=report.tampered, unsigned=report.unsigned, verified_at=utcnow()
+    )
+
+
 @router.get("/audit-events", response_model=Page[AuditEventOut])
 async def list_audit(
     actor: ActorDep,
@@ -165,10 +180,13 @@ async def dashboard(actor: ActorDep, session: SessionDep) -> DashboardSummaryOut
     async def scalar(stmt: object) -> int:
         return int((await session.execute(stmt)).scalar_one() or 0)  # type: ignore[call-overload]
 
-    emails_total = await scalar(scoped_count(EmailMessage, EmailMessage.deleted_at.is_(None)))
+    # Email counters only include emails still in the mailbox (as listed by GET /emails).
+    in_mailbox = EmailMessage.deleted_at.is_(None)
+    emails_total = await scalar(scoped_count(EmailMessage, in_mailbox))
     emails_analyzed = await scalar(
         scoped_count(
             EmailMessage,
+            in_mailbox,
             EmailMessage.analysis_status.in_([EmailAnalysisStatus.AWAITING_REVIEW, EmailAnalysisStatus.DONE]),
         )
     )
@@ -182,7 +200,7 @@ async def dashboard(actor: ActorDep, session: SessionDep) -> DashboardSummaryOut
     run_counts: dict[WorkflowStatus, int] = {k: int(v) for k, v in run_rows}
     category_rows = await session.execute(
         visible(select(EmailMessage.category, func.count()), EmailMessage, actor)
-        .where(EmailMessage.category.is_not(None))
+        .where(EmailMessage.category.is_not(None), in_mailbox)
         .group_by(EmailMessage.category)
     )
     categories: dict[EmailCategory | None, int] = {k: int(v) for k, v in category_rows}

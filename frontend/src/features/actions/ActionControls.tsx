@@ -9,7 +9,7 @@ import {
   IconRotate,
   IconX,
 } from '@tabler/icons-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { isApiError, type ApiError } from '../../api/client';
 import type { ActionDetail } from '../../api/types';
@@ -23,6 +23,9 @@ import {
   useReconcileAction,
   useRejectAction,
 } from './hooks';
+
+/** Mantine's modal close (×) button has no accessible name by default. */
+const CLOSE_BUTTON_PROPS = { 'aria-label': 'Close dialog' };
 
 const NO_PERMISSIONS = {
   can_edit: false,
@@ -95,6 +98,17 @@ export function ActionControls({
   const [rejectTouched, setRejectTouched] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
 
+  // One write at a time, enforced synchronously: `disabled`/`loading` only take effect after the next
+  // render, so two clicks delivered before it (a fast double-click) must not send a second request.
+  const writeInFlight = useRef(false);
+  const singleFlight = (start: (release: () => void) => void) => {
+    if (writeInFlight.current) return;
+    writeInFlight.current = true;
+    start(() => {
+      writeInFlight.current = false;
+    });
+  };
+
   const busy =
     queued ||
     approve.isPending ||
@@ -134,84 +148,99 @@ export function ActionControls({
 
   const submitApprove = () => {
     // Send exactly the version + payload hash the reviewer is looking at.
-    approve.mutate(
-      { version: action.version, payloadHash: action.payload_hash, comment },
-      {
-        onSuccess: (detail) => {
-          approveModal.close();
-          setComment('');
-          notifySuccess('Approved', `Version ${detail.version} is approved and ready to execute.`);
+    singleFlight((release) =>
+      approve.mutate(
+        { version: action.version, payloadHash: action.payload_hash, comment },
+        {
+          onSettled: release,
+          onSuccess: (detail) => {
+            approveModal.close();
+            setComment('');
+            notifySuccess('Approved', `Version ${detail.version} is approved and ready to execute.`);
+          },
+          onError: (error) => {
+            approveModal.close();
+            handleError('Approval failed', error, onConflict);
+          },
         },
-        onError: (error) => {
-          approveModal.close();
-          handleError('Approval failed', error, onConflict);
-        },
-      },
+      ),
     );
   };
 
   const submitReject = () => {
     setRejectTouched(true);
     if (!rejectReason || rejectReason.length > LIMITS.rejectReason) return;
-    reject.mutate(rejectReason, {
-      onSuccess: () => {
-        rejectModal.close();
-        setReason('');
-        setRejectTouched(false);
-        notifySuccess('Rejected', 'The proposal was rejected and will not be executed.');
-      },
-      onError: (error) => {
-        rejectModal.close();
-        handleError('Rejection failed', error, onConflict);
-      },
-    });
+    singleFlight((release) =>
+      reject.mutate(rejectReason, {
+        onSettled: release,
+        onSuccess: () => {
+          rejectModal.close();
+          setReason('');
+          setRejectTouched(false);
+          notifySuccess('Rejected', 'The proposal was rejected and will not be executed.');
+        },
+        onError: (error) => {
+          rejectModal.close();
+          handleError('Rejection failed', error, onConflict);
+        },
+      }),
+    );
   };
 
   const submitCancel = () => {
-    cancel.mutate(cancelReason, {
-      onSuccess: () => {
-        cancelModal.close();
-        setCancelReason('');
-        notifySuccess('Cancelled', 'The proposal was cancelled.');
-      },
-      onError: (error) => {
-        cancelModal.close();
-        handleError('Cancel failed', error, onConflict);
-      },
-    });
+    singleFlight((release) =>
+      cancel.mutate(cancelReason, {
+        onSettled: release,
+        onSuccess: () => {
+          cancelModal.close();
+          setCancelReason('');
+          notifySuccess('Cancelled', 'The proposal was cancelled.');
+        },
+        onError: (error) => {
+          cancelModal.close();
+          handleError('Cancel failed', error, onConflict);
+        },
+      }),
+    );
   };
 
   const submitExecute = () => {
-    execute.mutate(
-      { version: action.version, payloadHash: action.payload_hash },
-      {
-        onSuccess: (accepted) => {
-          executeModal.close();
-          onQueued(accepted.action.updated_at);
-          notifySuccess(
-            'Execution queued',
-            'The approved payload is being written. Status updates automatically.',
-          );
+    singleFlight((release) =>
+      execute.mutate(
+        { version: action.version, payloadHash: action.payload_hash },
+        {
+          onSettled: release,
+          onSuccess: (accepted) => {
+            executeModal.close();
+            onQueued(accepted.action.updated_at);
+            notifySuccess(
+              'Execution queued',
+              'The approved payload is being written. Status updates automatically.',
+            );
+          },
+          onError: (error) => {
+            executeModal.close();
+            handleError('Execution failed to start', error, onConflict);
+          },
         },
-        onError: (error) => {
-          executeModal.close();
-          handleError('Execution failed to start', error, onConflict);
-        },
-      },
+      ),
     );
   };
 
   const submitReconcile = () => {
-    reconcile.mutate(undefined, {
-      onSuccess: (accepted) => {
-        onQueued(accepted.action.updated_at);
-        notifySuccess(
-          'Reconciliation queued',
-          'NUVEXA is looking the external item up. Status updates automatically.',
-        );
-      },
-      onError: (error) => handleError('Reconcile failed', error, onConflict),
-    });
+    singleFlight((release) =>
+      reconcile.mutate(undefined, {
+        onSettled: release,
+        onSuccess: (accepted) => {
+          onQueued(accepted.action.updated_at);
+          notifySuccess(
+            'Reconciliation queued',
+            'NUVEXA is looking the external item up. Status updates automatically.',
+          );
+        },
+        onError: (error) => handleError('Reconcile failed', error, onConflict),
+      }),
+    );
   };
 
   const nothingToShow =
@@ -330,6 +359,7 @@ export function ActionControls({
       <Modal
         opened={approveOpen}
         onClose={approve.isPending ? () => undefined : approveModal.close}
+        closeButtonProps={CLOSE_BUTTON_PROPS}
         title="Approve this exact payload?"
       >
         <Stack gap="md">
@@ -366,6 +396,7 @@ export function ActionControls({
       <Modal
         opened={rejectOpen}
         onClose={reject.isPending ? () => undefined : rejectModal.close}
+        closeButtonProps={CLOSE_BUTTON_PROPS}
         title="Reject this proposal"
       >
         <Stack gap="md">
@@ -398,6 +429,7 @@ export function ActionControls({
       <Modal
         opened={cancelOpen}
         onClose={cancel.isPending ? () => undefined : cancelModal.close}
+        closeButtonProps={CLOSE_BUTTON_PROPS}
         title="Cancel this proposal?"
       >
         <Stack gap="md">
@@ -426,6 +458,7 @@ export function ActionControls({
       <Modal
         opened={executeOpen}
         onClose={execute.isPending ? () => undefined : executeModal.close}
+        closeButtonProps={CLOSE_BUTTON_PROPS}
         title={status === 'failed' ? 'Retry execution?' : 'Execute approved action?'}
       >
         <Stack gap="md">

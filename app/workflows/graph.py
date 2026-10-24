@@ -82,6 +82,10 @@ class _Halt(Exception):
 
 def set_run_status(run: WorkflowRun, status: WorkflowStatus, step: str | None = None) -> None:
     ensure_workflow_transition(run.status, status)
+    if run.status is W.FAILED and status is not W.FAILED:
+        # Recovered (a retried step succeeded): the previous failure no longer describes the run.
+        run.error_category = None
+        run.error_message = None
     run.status = status
     run.current_step = step or status.value
 
@@ -261,7 +265,7 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
                 message="Email loaded, normalized and screened as untrusted content.",
                 details={
                     "attempt": attempt,
-                    "body_chars": len(ctx.body_text),
+                    "body_length": len(ctx.body_text),  # "body_*" keys are redacted unless allow-listed
                     "truncated": ctx.truncated,
                     "injection_rules": sorted({f.rule for f in ctx.injection_flags}),
                 },
@@ -285,6 +289,7 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
         result = await deps.agent.classify(ctx, taxonomy)
         async with sf() as s:
             run, _ = await load(s, state["run_id"], for_update=True)
+            await _guard(run)  # cancelled while the model call was in flight
             set_run_status(run, W.CLASSIFIED, "classify")
             _accumulate(run, result.usage)
             record_workflow_event(
@@ -316,6 +321,7 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
         result = await deps.agent.extract(ctx, classification)
         async with sf() as s:
             run, _ = await load(s, state["run_id"], for_update=True)
+            await _guard(run)  # cancelled while the model call was in flight
             set_run_status(run, W.EXTRACTED, "extract")
             _accumulate(run, result.usage)
             record_workflow_event(
@@ -635,9 +641,11 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
         decision = state.get("decision") or {}
         run_id = state["run_id"]
         started = time.perf_counter()
+        previous: WorkflowStatus | None = None
         async with sf() as s:
             run, _ = await load(s, run_id, for_update=True)
             if op == "execute" and run.status in (W.APPROVED, W.FAILED, W.PENDING_APPROVAL):
+                previous = run.status
                 set_run_status(run, W.EXECUTING, "execute")
                 await s.commit()
         async with sf() as s:
@@ -673,8 +681,15 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
                 await s.rollback()
                 message = f"{op.capitalize()} not performed: {exc.message}"
                 details["error_code"] = exc.code
+            except ValueError, TypeError:  # malformed resume payload (e.g. a damaged job row)
+                await s.rollback()
+                message = f"{op.capitalize()} not performed: malformed request."
+                details["error_code"] = "malformed_request"
         async with sf() as s:
-            run, _ = await load(s, run_id)
+            run, _ = await load(s, run_id, for_update=True)
+            if status == "failure" and previous is not None and run.status is W.EXECUTING:
+                # Nothing was executed: undo the optimistic status so review_gate/finalize start from a real one.
+                set_run_status(run, previous, op)
             record_workflow_event(
                 s,
                 tenant_id=run.tenant_id,

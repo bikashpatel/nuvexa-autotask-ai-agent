@@ -136,13 +136,15 @@ export function validateSettings(v: SettingsFormValues): Record<string, string> 
   }
 
   const { high, medium } = v.confidence;
-  errors['confidence.high'] = high < 0 || high > 1 || Number.isNaN(high) ? 'Must be between 0 and 1' : null;
-  errors['confidence.medium'] =
-    medium < 0 || medium > 1 || Number.isNaN(medium)
-      ? 'Must be between 0 and 1'
-      : medium > high
-        ? 'Medium threshold must be ≤ high threshold'
-        : null;
+  // An emptied NumberInput yields '' (not a number); without the type check it would pass every
+  // comparison and be saved as Number('') === 0.
+  const notUnit = (n: unknown) => typeof n !== 'number' || Number.isNaN(n) || n < 0 || n > 1;
+  errors['confidence.high'] = notUnit(high) ? 'Must be between 0 and 1' : null;
+  errors['confidence.medium'] = notUnit(medium)
+    ? 'Must be between 0 and 1'
+    : !notUnit(high) && medium > high
+      ? 'Medium threshold must be ≤ high threshold'
+      : null;
 
   errors['retention.email_body_days'] = range(v.retention.email_body_days, 1, 3650, 'Email body retention');
   errors['retention.workflow_event_days'] = range(

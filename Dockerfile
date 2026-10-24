@@ -58,7 +58,14 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:${PATH}"
 
-RUN groupadd --system --gid 10001 nuvexa \
+# Security: apply available Debian security updates, and remove pip from the system interpreter — the app
+# runs from the uv-built virtualenv, and pip's vendored urllib3/msgpack copies carry known CVEs (Trivy).
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/* \
+ && python -m pip uninstall -y pip \
+ && rm -rf /usr/local/lib/python3.14/site-packages/pip* /usr/local/bin/pip* \
+ && groupadd --system --gid 10001 nuvexa \
  && useradd --system --uid 10001 --gid nuvexa --create-home --home-dir /home/nuvexa \
       --shell /usr/sbin/nologin nuvexa
 

@@ -92,6 +92,9 @@ RULES: tuple[InjectionRule, ...] = (
         re.compile(
             r"<\|\s*(?:im_start|im_end|system|user|assistant|endoftext)\s*\|>"
             r"|\[/?(?:INST|SYS)\]|<</?SYS>>|</?(?:system|assistant)>"
+            # Forged data-block delimiters (`<<<END_EMAIL_DATA_{nonce}>>>`); prompts.neutralize defangs them.
+            r"|<{2,}\s*/?\s*(?:END[\s_-]*)?(?:EMAIL|ANALYSIS)[\s_-]*DATA"
+            r"|\b(?:END_)?(?:EMAIL|ANALYSIS)_DATA_[0-9a-f]{8,}\b"
             r"|^[ \t>]*#{2,}\s*(?:system|assistant)\s*(?::|$)"
             r"|(?-i:^[ \t>]*\[?(?:SYSTEM|ASSISTANT|DEVELOPER)\]?\s*:)"
             r"|^[ \t>]*\[?(?:system|assistant|developer)\]?\s*:\s*(?=(?:you|ignore|disregard|override|new|from\s+now|"

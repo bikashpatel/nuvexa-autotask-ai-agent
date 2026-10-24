@@ -272,7 +272,7 @@ export function ActionCard({ actionId, focused = false }: { actionId: string; fo
   if (query.isPending) {
     return (
       <Card>
-        <Stack gap="sm" aria-busy="true" aria-label="Loading action">
+        <Stack gap="sm" role="status" aria-busy="true" aria-label="Loading action">
           <Skeleton height={24} width="60%" />
           <Skeleton height={14} />
           <Skeleton height={180} />

@@ -1,8 +1,9 @@
 import { MantineProvider } from '@mantine/core';
+import { Notifications } from '@mantine/notifications';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, type RenderResult } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { RouterProvider, createMemoryRouter } from 'react-router';
+import { RouterProvider, createMemoryRouter, type RouteObject } from 'react-router';
 import { vi } from 'vitest';
 
 import type { MeOut } from '../api/types';
@@ -39,6 +40,24 @@ export function createTestQueryClient(): QueryClient {
   });
 }
 
+export interface RenderOptions {
+  session?: MeOut | null;
+  queryClient?: QueryClient;
+  /** Route pattern the UI is mounted on (e.g. `/actions/:actionId`). */
+  path?: string;
+  /** Initial location. */
+  route?: string;
+  /** Mount Mantine <Notifications/> so toasts are rendered and can be asserted. */
+  withNotifications?: boolean;
+  /** Extra routes next to the UI (navigation targets, e.g. `{ path: '/login', element: … }`). */
+  extraRoutes?: RouteObject[];
+}
+
+export type RenderWithProvidersResult = RenderResult & {
+  queryClient: QueryClient;
+  router: ReturnType<typeof createMemoryRouter>;
+};
+
 export function renderWithProviders(
   ui: ReactNode,
   {
@@ -46,11 +65,14 @@ export function renderWithProviders(
     queryClient = createTestQueryClient(),
     path = '*',
     route = '/',
-  }: { session?: MeOut | null; queryClient?: QueryClient; path?: string; route?: string } = {},
-): RenderResult & { queryClient: QueryClient } {
-  const router = createMemoryRouter([{ path, element: ui }], { initialEntries: [route] });
+    withNotifications = false,
+    extraRoutes = [],
+  }: RenderOptions = {},
+): RenderWithProvidersResult {
+  const router = createMemoryRouter([...extraRoutes, { path, element: ui }], { initialEntries: [route] });
   const result = render(
     <MantineProvider theme={theme} env="test">
+      {withNotifications ? <Notifications /> : null}
       <QueryClientProvider client={queryClient}>
         <SessionContext.Provider value={session}>
           <RouterProvider router={router} />
@@ -58,7 +80,24 @@ export function renderWithProviders(
       </QueryClientProvider>
     </MantineProvider>,
   );
-  return { ...result, queryClient };
+  return { ...result, queryClient, router };
+}
+
+/** Wrapper for `renderHook` (TanStack Query + Mantine + a session; no router). */
+export function createWrapper({
+  queryClient = createTestQueryClient(),
+  session = TEST_SESSION,
+}: { queryClient?: QueryClient; session?: MeOut | null } = {}) {
+  function Wrapper({ children }: { children: ReactNode }) {
+    return (
+      <MantineProvider theme={theme} env="test">
+        <QueryClientProvider client={queryClient}>
+          <SessionContext.Provider value={session}>{children}</SessionContext.Provider>
+        </QueryClientProvider>
+      </MantineProvider>
+    );
+  }
+  return { Wrapper, queryClient };
 }
 
 export function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -66,6 +105,25 @@ export function jsonResponse(body: unknown, status = 200, headers: Record<string
     status,
     headers: { 'content-type': 'application/json', ...headers },
   });
+}
+
+/** An API error in the documented schema `{ error: { code, message, correlation_id, details } }`. */
+export function errorResponse(
+  status: number,
+  code: string,
+  {
+    message = `Request failed: ${code}`,
+    correlationId = `corr-${code}`,
+    details = [],
+    headers = {},
+  }: {
+    message?: string;
+    correlationId?: string | null;
+    details?: Record<string, unknown>[];
+    headers?: Record<string, string>;
+  } = {},
+): Response {
+  return jsonResponse({ error: { code, message, correlation_id: correlationId, details } }, status, headers);
 }
 
 export interface RecordedCall {
@@ -113,6 +171,17 @@ export function mockFetch(routes: Route[]) {
   });
   vi.stubGlobal('fetch', fetchMock);
   return { fetchMock, calls };
+}
+
+/** Calls matching a method and exact pathname (query string ignored). */
+export function callsTo(calls: RecordedCall[], method: string, pathname: string): RecordedCall[] {
+  return calls.filter((c) => c.method === method && (c.url.split('?')[0] ?? c.url) === pathname);
+}
+
+/** Parsed query parameters of a recorded call (repeated keys preserved via getAll). */
+export function queryOf(call: RecordedCall): URLSearchParams {
+  const index = call.url.indexOf('?');
+  return new URLSearchParams(index === -1 ? '' : call.url.slice(index + 1));
 }
 
 /** A promise you resolve later — used to hold a request "in flight". */

@@ -96,7 +96,14 @@ port 8000. The frontend image therefore needs a configurable upstream for this d
 example an nginx template rendered from an environment variable), and the proxied request's `Host`
 header must be the API app's name/FQDN so the environment's ingress routes it; forward the original
 host in `X-Forwarded-Host`. Keep everything same-origin: the session cookie and the OAuth callback
-live on the dashboard host.
+live on the dashboard host. The image implements this with `API_UPSTREAM` (default `http://api:8000`).
+
+**Client IP integrity.** The API uses the forwarded client address for login rate limiting and audit
+records, so nginx *overwrites* `X-Forwarded-For` with `$remote_addr` instead of appending a
+client-supplied value. When another proxy terminates traffic first (the Container Apps ingress),
+`$remote_addr` is that proxy: add `set_real_ip_from <ingress/infrastructure subnet>;` and
+`real_ip_header X-Forwarded-For;` to the nginx config so `$remote_addr` becomes the real client before
+it is forwarded, and keep `FORWARDED_ALLOW_IPS` on the API restricted to the frontend's network.
 
 ## Database
 

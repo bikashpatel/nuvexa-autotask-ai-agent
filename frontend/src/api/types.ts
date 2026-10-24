@@ -117,6 +117,7 @@ export type FailureCategory =
   | 'transient'
   | 'timeout'
   | 'ambiguous'
+  | 'delta_expired'
   | 'configuration'
   | 'llm_output'
   | 'llm_provider'

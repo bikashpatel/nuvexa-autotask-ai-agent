@@ -134,7 +134,8 @@ def build_email_block(ctx: EmailContext, nonce: str | None = None) -> str:
     lines = [
         f"<<<EMAIL_DATA_{nonce}>>>",
         f"Subject: {_one_line(ctx.subject, 998)}",
-        f"From: {sender or 'unknown'}",
+        # Neutralized again as a whole: "name <address>" could otherwise join "<"/">" runs across the fields.
+        f"From: {neutralize(sender) or 'unknown'}",
         f"To: {', '.join(_one_line(a, 320) for a in ctx.to) or 'unknown'}",
     ]
     if ctx.cc:

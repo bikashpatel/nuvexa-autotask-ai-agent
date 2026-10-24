@@ -2,7 +2,7 @@ import { Card, Group, Skeleton, Stack } from '@mantine/core';
 
 export function TableSkeleton({ rows = 6, label = 'Loading' }: { rows?: number; label?: string }) {
   return (
-    <Stack gap="sm" aria-busy="true" aria-label={label}>
+    <Stack gap="sm" role="status" aria-busy="true" aria-label={label}>
       <Skeleton height={36} />
       {Array.from({ length: rows }, (_, i) => (
         <Skeleton key={i} height={44} />
@@ -13,7 +13,7 @@ export function TableSkeleton({ rows = 6, label = 'Loading' }: { rows?: number; 
 
 export function CardsSkeleton({ count = 6, height = 96 }: { count?: number; height?: number }) {
   return (
-    <Group grow gap="md" aria-busy="true" aria-label="Loading">
+    <Group grow gap="md" role="status" aria-busy="true" aria-label="Loading">
       {Array.from({ length: count }, (_, i) => (
         <Skeleton key={i} height={height} />
       ))}
@@ -23,7 +23,7 @@ export function CardsSkeleton({ count = 6, height = 96 }: { count?: number; heig
 
 export function DetailSkeleton() {
   return (
-    <Stack gap="md" aria-busy="true" aria-label="Loading">
+    <Stack gap="md" role="status" aria-busy="true" aria-label="Loading">
       <Skeleton height={32} width="40%" />
       <Skeleton height={16} width="60%" />
       <Card>

@@ -18,6 +18,7 @@ from app.core.config import Settings
 from app.core.security import sha256_hex
 from app.db.models import EmailMessage
 from app.domain.enums import ActionType, Priority
+from app.integrations.azure_devops.mapping import RESERVED_FIELDS
 from app.schemas.actions import (
     AzureDevOpsWorkItemPayload,
     EmailReplyDraftPayload,
@@ -288,7 +289,9 @@ class ActionPolicy:
                 if payload.work_item_type not in ado.allowed_work_item_types:
                     issues.append(f"Work item type '{payload.work_item_type}' is not allowed.")
                 for name in payload.additional_fields:
-                    if name not in ado.allowed_additional_fields:
+                    if name in RESERVED_FIELDS:  # even if allow-listed: the request builder refuses them
+                        issues.append(f"Field '{name}' can only be set through its dedicated attribute.")
+                    elif name not in ado.allowed_additional_fields:
                         issues.append(f"Field '{name}' is not in the allowed field list.")
             case EmailReplyDraftPayload():
                 if email is not None and [str(a).lower() for a in payload.to] != [(email.sender_address or "").lower()]:

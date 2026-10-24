@@ -32,6 +32,7 @@ from app.schemas.api import (
 )
 from app.services.action_policy import ActionPolicy
 from app.services.auth_service import EntraAuthService, disconnect_account
+from app.services.authz import Perm, require
 from app.services.integration_clients import find_active_account, make_ado_client_factory
 from app.services.settings_service import get_tenant_settings
 
@@ -103,14 +104,14 @@ async def _connect(
     return _redirect_with_binding(auth_uri, binding, settings)
 
 
-@router.get("/microsoft/connect", dependencies=[Depends(rate_limit("auth", 20))])
+@router.get("/microsoft/connect", dependencies=[Depends(rate_limit("auth", 20, per="ip"))])
 async def connect_microsoft(
     actor: ActorDep, session: SessionDep, settings: SettingsDep, redirect_to: str | None = None
 ) -> RedirectResponse:
     return await _connect(OAuthPurpose.CONNECT_MAILBOX, actor.user_id, session, settings, redirect_to)
 
 
-@router.get("/azure-devops/connect", dependencies=[Depends(rate_limit("auth", 20))])
+@router.get("/azure-devops/connect", dependencies=[Depends(rate_limit("auth", 20, per="ip"))])
 async def connect_azure_devops(
     actor: ActorDep, session: SessionDep, settings: SettingsDep, redirect_to: str | None = None
 ) -> RedirectResponse:
@@ -127,6 +128,7 @@ async def disconnect(connection_id: uuid.UUID, actor: ActorDep, session: Session
 
 @router.get("/azure-devops/test", response_model=AdoConnectionTestOut)
 async def ado_test(actor: ActorDep, session: SessionDep, settings: SettingsDep) -> AdoConnectionTestOut:
+    require(actor, Perm.ACTION_EDIT, resource_type="azure_devops")  # uses the service credentials
     try:
         client = await make_ado_client_factory(settings)(session, actor)
     except AppError as exc:
@@ -145,6 +147,7 @@ async def ado_test(actor: ActorDep, session: SessionDep, settings: SettingsDep) 
 
 @router.get("/azure-devops/projects", response_model=AdoProjectsOut)
 async def ado_projects(actor: ActorDep, session: SessionDep, settings: SettingsDep) -> AdoProjectsOut:
+    require(actor, Perm.ACTION_EDIT, resource_type="azure_devops")  # uses the service credentials
     client = await make_ado_client_factory(settings)(session, actor)
     try:
         return AdoProjectsOut(items=await client.list_projects())
@@ -156,6 +159,7 @@ async def ado_projects(actor: ActorDep, session: SessionDep, settings: SettingsD
 async def ado_work_item_types(
     project: str, actor: ActorDep, session: SessionDep, settings: SettingsDep
 ) -> AdoWorkItemTypesOut:
+    require(actor, Perm.ACTION_EDIT, resource_type="azure_devops")  # uses the service credentials
     client = await make_ado_client_factory(settings)(session, actor)
     try:
         return AdoWorkItemTypesOut(project=project, items=await client.list_work_item_types(project))
@@ -169,6 +173,7 @@ async def ado_work_item_types(
 async def ado_validate(
     body: AdoValidateRequest, actor: ActorDep, session: SessionDep, settings: SettingsDep
 ) -> AdoValidateOut:
+    require(actor, Perm.ACTION_EDIT, resource_type="azure_devops")  # uses the service credentials
     data = dict(body.payload)
     data["kind"] = "create_azure_devops_work_item"
     if "source_email" not in data:

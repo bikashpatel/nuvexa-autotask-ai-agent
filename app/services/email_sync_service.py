@@ -154,9 +154,17 @@ class EmailSyncService:
                         initial_days=self.settings.mail_sync_initial_days,
                     )
             except IntegrationError as exc:
-                await session.rollback()
-                await self._record_failure(session, account.id, exc)
+                await session.rollback()  # expires `account`: use the plain id from here on
+                await self._record_failure(session, account_id, exc)
                 raise
+            except Exception as exc:
+                log.exception("mail_sync_unexpected_error", account_id=str(account_id))
+                await session.rollback()
+                generic = IntegrationError(
+                    "Mailbox synchronization failed unexpectedly.", category=FailureCategory.INTERNAL
+                )
+                await self._record_failure(session, account_id, generic)
+                raise generic from exc
 
         for msg in changes.upserts:
             await self._upsert(session, account, msg, result)

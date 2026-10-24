@@ -35,3 +35,6 @@ frontend/coverage/
 
 # Specification source (kept locally)
 NUVEXA-AutoTask-AI-Agent_Claude_Code_Master_Prompt.pdf
+
+# System E2E artifacts (screenshots, container logs)
+e2e-artifacts/

@@ -186,7 +186,8 @@ function humanize(value: string): string {
 /** Look up a descriptor; unknown values (forward-compatible API additions) render neutrally. */
 export function getStatusDescriptor(kind: StatusKind, status: string): StatusDescriptor {
   const map = STATUS_MAPS[kind] as Record<string, StatusDescriptor>;
-  return map[status] ?? d(humanize(status), 'neutral', 'circle');
+  // Own keys only: an inherited name ("constructor", "toString") must not resolve to a function.
+  return Object.hasOwn(map, status) ? map[status]! : d(humanize(status), 'neutral', 'circle');
 }
 
 // --- In-flight detection (drives polling) ------------------------------------------------------

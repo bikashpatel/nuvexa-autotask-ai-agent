@@ -10,28 +10,13 @@ from sqlalchemy import select
 
 from app.core.errors import ConfigurationError, IntegrationError
 from app.core.security import SecretBox
-from app.db.models import ConnectedAccount, CredentialRecord
-from app.domain.enums import ConnectionProvider, FailureCategory
+from app.db.models import CredentialRecord
+from app.domain.enums import FailureCategory
 from app.integrations.microsoft_graph.token_store import CredentialStore, MsalAccessTokenProvider
 from tests.conftest import TEST_FERNET_KEY
 
 REFRESH = "fake-refresh-token-value-0123456789"
 CACHE_JSON = json.dumps({"RefreshToken": {"home-env-client": {"secret": REFRESH, "credential_type": "RefreshToken"}}})
-
-
-@pytest.fixture
-async def account(session, tenant, make_user) -> ConnectedAccount:
-    user = await make_user(tenant)
-    acct = ConnectedAccount(
-        tenant_id=tenant.id,
-        user_id=user.id,
-        provider=ConnectionProvider.MICROSOFT_GRAPH,
-        external_account_id="oid-1.tid-1",
-        email="morgan@example.com",
-    )
-    session.add(acct)
-    await session.commit()
-    return acct
 
 
 @pytest.fixture

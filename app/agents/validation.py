@@ -264,8 +264,8 @@ def _explicit_dates(content: str) -> list[tuple[int | None, int, int]]:
     return found
 
 
-def _deadline_supported(deadline: datetime, email: EmailContext, text: _Text) -> bool:
-    target: date = deadline.date()
+def _deadline_supported(target: date, email: EmailContext, text: _Text) -> bool:
+    """`target` is the calendar date as written by the model (in its own UTC offset, not converted to UTC)."""
     for year, month, day in _explicit_dates(text.content):
         if month == target.month and day == target.day and year in (None, target.year):
             return True
@@ -284,7 +284,7 @@ def _validate_deadline(raw: str | None, email: EmailContext, text: _Text, warnin
         warnings.add("Deadline was not a valid ISO-8601 date and was removed.")
         return None
     deadline = ensure_utc(parsed)
-    if not _deadline_supported(deadline, email, text):
+    if not _deadline_supported(parsed.date(), email, text):
         warnings.add("Deadline was removed because no date in the email supports it.")
         return None
     return deadline
