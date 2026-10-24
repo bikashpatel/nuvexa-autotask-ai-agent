@@ -19,6 +19,13 @@ from cryptography.fernet import Fernet
 from app import cli
 from app.core.config import Settings, get_settings
 
+
+@pytest.fixture(autouse=True)
+def _plain_argparse_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Python 3.14 argparse colorizes output when FORCE_COLOR is set (as in CI); assert on plain text."""
+    monkeypatch.setenv("PYTHON_COLORS", "0")
+
+
 REPO = Path(cli.__file__).resolve().parent.parent
 DEMO_ENV = {
     "DATABASE_URL": "sqlite+aiosqlite:///./data/nuvexa-demo.db",
