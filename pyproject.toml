@@ -118,6 +118,10 @@ asyncio_default_test_loop_scope = "function"
 testpaths = ["tests"]  # e2e/ runs separately against a live stack
 addopts = "-ra --strict-markers"
 markers = [
+    "unit: fast, isolated tests (tests/unit) — applied automatically by directory",
+    "integration: in-process API + worker + database tests (tests/integration) — applied automatically",
+    "security: security regression tests (tests/security) — applied automatically",
+    "evaluation: offline AI evaluation baseline (tests/evaluation) — applied automatically",
     "postgres: requires a PostgreSQL database (TEST_DATABASE_URL)",
     "live_llm: calls a real LLM provider (opt-in, costs money)",
     "e2e: system tests against a running Docker Compose stack (scripts/e2e.sh)",
@@ -126,4 +130,26 @@ filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 
 [tool.coverage.run]
 source = ["app"]
+branch = true
 omit = ["app/db/migrations/*"]
+
+[tool.coverage.report]
+# Combined line + branch coverage gate (enforced whenever pytest runs with --cov). Set to the achieved level
+# rounded down (2026-10-25: 99.57 %); raise it as coverage improves — never lower it to make CI pass.
+fail_under = 99
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "@overload"]
+
+[tool.mutmut]
+# Mutation testing for security-critical modules (manual / scheduled; see docs/TESTING_STRATEGY.md).
+paths_to_mutate = [
+    "app/domain/state_machine.py",
+    "app/services/authz.py",
+    "app/services/approval_service.py",
+    "app/services/execution_service.py",
+    "app/services/action_policy.py",
+    "app/integrations/microsoft_graph/id_token.py",
+]
+tests_dir = ["tests/unit/", "tests/security/"]
+also_copy = ["app/", "tests/", "scripts/"]

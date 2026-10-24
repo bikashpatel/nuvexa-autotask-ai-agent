@@ -38,3 +38,7 @@ NUVEXA-AutoTask-AI-Agent_Claude_Code_Master_Prompt.pdf
 
 # System E2E artifacts (screenshots, container logs)
 e2e-artifacts/
+
+# Mutation testing workspace (mutmut)
+mutants/
+.mutmut-cache

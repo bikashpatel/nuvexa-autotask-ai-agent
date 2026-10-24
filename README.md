@@ -227,16 +227,22 @@ validated at startup; a missing required variable fails fast with a clear messag
 
 ## Testing and evaluation
 
+Development is test-first (Red → Green → Refactor); see [docs/TESTING_STRATEGY.md](docs/TESTING_STRATEGY.md).
+
 ```bash
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app
-uv run pytest                                   # SQLite, mocks, heuristic agent — no network, no paid calls
+uv run pytest --cov=app                         # all layers on SQLite + 99 % line/branch coverage gate
+uv run pytest -m unit | -m integration | -m security | -m evaluation   # one layer at a time
 TEST_DATABASE_URL=postgresql+psycopg://nuvexa:nuvexa@localhost:5432/nuvexa_test uv run pytest
+scripts/e2e.sh                                  # system E2E: isolated Compose stack + Playwright
+uv run --with mutmut mutmut run                 # mutation testing of security-critical modules
 uv run python -m app.evaluation.run --provider heuristic   # labelled evaluation dataset
-cd frontend && npm ci && npm run lint && npm run typecheck && npm test && npm run build
+cd frontend && npm ci && npm run lint && npm run typecheck && npm run test:coverage && npm run build
 ```
 
-Tests that call a paid model are marked `live_llm` and excluded by default. CI
+Tests that call a paid model are marked `live_llm` and excluded by default. Pull requests that change
+production code without changing tests fail the CI `tdd-guard` job. CI
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs lint, strict mypy, the test suite on
 PostgreSQL 18, migrations on empty PostgreSQL and SQLite databases, the frontend checks, and builds
 both container images.

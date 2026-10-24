@@ -24,6 +24,22 @@ from app.domain.enums import UserRole
 
 TEST_FERNET_KEY = Fernet.generate_key().decode()
 
+# Test layers (docs/TESTING_STRATEGY.md): the marker follows the directory, so `pytest -m unit` etc. work
+# without anyone having to remember to tag a test.
+_LAYER_BY_DIRECTORY = {"unit": "unit", "integration": "integration", "security": "security", "evaluation": "evaluation"}
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    tests_root = Path(__file__).resolve().parent
+    for item in items:
+        try:
+            layer_dir = Path(str(item.path)).resolve().relative_to(tests_root).parts[0]
+        except ValueError, IndexError:
+            continue
+        layer = _LAYER_BY_DIRECTORY.get(layer_dir)
+        if layer is not None:
+            item.add_marker(getattr(pytest.mark, layer))
+
 
 def make_settings(database_url: str, **overrides: Any) -> Settings:
     values: dict[str, Any] = {

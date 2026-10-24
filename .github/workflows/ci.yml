@@ -26,6 +26,26 @@ env:
   FORCE_COLOR: "1"
 
 jobs:
+  tdd-guard:
+    # Pull requests that change production code (app/, frontend/src/) must change tests too.
+    # Exceptions: a "TDD-Exempt: <reason>" line in the PR description (logged for reviewers).
+    name: TDD guard (production changes include tests)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Production changes must include test changes
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          # Untrusted text: passed as data via the environment, parsed by the script, never interpolated.
+          TDD_GUARD_PR_BODY: ${{ github.event.pull_request.body }}
+        run: git diff --name-only "origin/${BASE_REF}...HEAD" | python3 scripts/check_test_changes.py
+
   backend:
     name: Backend (ruff, mypy, pytest on PostgreSQL, migrations)
     runs-on: ubuntu-24.04
@@ -84,6 +104,7 @@ jobs:
         run: uv run alembic upgrade head
 
       - name: Tests (PostgreSQL via TEST_DATABASE_URL)
+        # Coverage gate: fail_under in pyproject.toml ([tool.coverage.report]); branch coverage enabled.
         run: uv run pytest --cov=app --cov-report=xml --cov-report=term
 
       - name: Upload coverage report

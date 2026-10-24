@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
 from app.core.errors import IntegrationError
+from app.domain.enums import FailureCategory
 from app.integrations.microsoft_graph.id_token import HttpJwksFetcher, IdTokenError, IdTokenValidator
 from app.integrations.microsoft_graph.oauth import EntraOAuthClient
 from tests.conftest import TEST_FERNET_KEY, make_settings
@@ -273,3 +274,123 @@ async def test_sign_in_without_a_raw_id_token_fails() -> None:
     client = entra_client({"id_token_claims": claims(), "scope": "User.Read"})
     with pytest.raises(IntegrationError):
         await client.complete_flow({"state": "s", "nonce": "nonce-1"}, {"state": "s"}, msal.SerializableTokenCache())
+
+
+# --------------------------------------------------------------------------------------- mutation-hardening
+# Pinned down after mutation testing showed these behaviours were not asserted (docs/TESTING_STRATEGY.md).
+
+
+async def test_rs256_token_without_a_key_id_is_rejected_cleanly() -> None:
+    token = jwt.encode(claims(), SIGNING_KEY, algorithm="RS256")  # no "kid" header
+    with pytest.raises(IdTokenError):
+        await validator().validate(token, nonce="nonce-1")
+
+
+async def test_lifetime_is_judged_by_the_injected_clock_only() -> None:
+    past = 1_600_000_000  # long before the wall clock: PyJWT's own exp check would reject this token
+    old_validator = IdTokenValidator(
+        client_id=CLIENT_ID,
+        authority_host=AUTHORITY,
+        allowed_tenant_ids=[TENANT],
+        jwks_fetcher=FakeJwks(jwks(("k1", SIGNING_KEY))),
+        clock=lambda: past,
+    )
+    token = sign(claims(iat=past - 60, nbf=past - 60, exp=past + 3600))
+    assert (await old_validator.validate(token, nonce="nonce-1"))["tid"] == TENANT
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"exp": NOW - 120}, {"nbf": NOW + 120}, {"iat": NOW + 120}],
+    ids=["exp-exactly-at-leeway", "nbf-exactly-at-leeway", "iat-exactly-at-leeway"],
+)
+async def test_leeway_boundaries_are_inclusive(overrides: dict[str, int]) -> None:
+    await validator().validate(sign(claims(**overrides)), nonce="nonce-1")
+
+
+async def test_a_jwks_document_without_keys_is_rejected() -> None:
+    with pytest.raises(IdTokenError):
+        await validator(FakeJwks({})).validate(sign(claims()), nonce="nonce-1")
+
+
+def test_id_token_errors_are_authorization_failures_and_never_retried() -> None:
+    error = IdTokenError("x")
+    assert error.retryable is False
+    assert error.category == FailureCategory.AUTHORIZATION
+
+
+@respx.mock
+async def test_jwks_fetcher_never_follows_redirects() -> None:
+    respx.get(f"{AUTHORITY}/{TENANT}/discovery/v2.0/keys").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://evil.example/keys"})
+    )
+    evil = respx.get("https://evil.example/keys").mock(
+        return_value=httpx.Response(200, json=jwks(("k1", ATTACKER_KEY)))
+    )
+    with pytest.raises(IdTokenError):
+        await HttpJwksFetcher(AUTHORITY)(TENANT)
+    assert evil.call_count == 0
+
+
+@respx.mock
+async def test_jwks_cache_is_per_tenant() -> None:
+    first = respx.get(f"{AUTHORITY}/{TENANT}/discovery/v2.0/keys").mock(
+        return_value=httpx.Response(200, json=jwks(("k1", SIGNING_KEY)))
+    )
+    second = respx.get(f"{AUTHORITY}/{OTHER_TENANT}/discovery/v2.0/keys").mock(
+        return_value=httpx.Response(200, json=jwks(("k2", ROTATED_KEY)))
+    )
+    fetcher = HttpJwksFetcher(AUTHORITY)
+    assert (await fetcher(TENANT))["keys"][0]["kid"] == "k1"
+    assert (await fetcher(OTHER_TENANT))["keys"][0]["kid"] == "k2"
+    assert (first.call_count, second.call_count) == (1, 1)
+
+
+@respx.mock
+async def test_authority_with_a_trailing_slash_is_normalized() -> None:
+    route = respx.get(f"{AUTHORITY}/{TENANT}/discovery/v2.0/keys").mock(
+        return_value=httpx.Response(200, json=jwks(("k1", SIGNING_KEY)))
+    )
+    await HttpJwksFetcher(AUTHORITY + "/")(TENANT)
+    assert route.call_count == 1
+    slashy = IdTokenValidator(
+        client_id=CLIENT_ID,
+        authority_host=AUTHORITY + "/",
+        allowed_tenant_ids=[TENANT],
+        jwks_fetcher=FakeJwks(jwks(("k1", SIGNING_KEY))),
+        clock=lambda: NOW,
+    )
+    await slashy.validate(sign(claims()), nonce="nonce-1")
+
+
+@respx.mock
+async def test_jwks_cache_expires_exactly_at_the_ttl() -> None:
+    route = respx.get(f"{AUTHORITY}/{TENANT}/discovery/v2.0/keys").mock(
+        return_value=httpx.Response(200, json=jwks(("k1", SIGNING_KEY)))
+    )
+    now = [1000.0]
+    fetcher = HttpJwksFetcher(AUTHORITY, ttl_seconds=60, clock=lambda: now[0])
+    await fetcher(TENANT)
+    now[0] += 59.9
+    await fetcher(TENANT)
+    assert route.call_count == 1
+    now[0] = 1060.0  # exactly one TTL later
+    await fetcher(TENANT)
+    assert route.call_count == 2
+
+
+async def test_jwks_fetches_use_the_configured_timeout_and_never_follow_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[dict[str, Any]] = []
+    real_client = httpx.AsyncClient
+
+    def recording_client(**kwargs: Any) -> httpx.AsyncClient:
+        created.append(kwargs)
+        return real_client(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200, json=jwks(("k1", SIGNING_KEY))))
+        )
+
+    monkeypatch.setattr("app.integrations.microsoft_graph.id_token.httpx.AsyncClient", recording_client)
+    await HttpJwksFetcher(AUTHORITY, timeout_seconds=7)(TENANT)
+    assert created == [{"timeout": 7, "follow_redirects": False}]
