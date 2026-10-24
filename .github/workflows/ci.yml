@@ -1,0 +1,164 @@
+# Continuous integration: backend quality gates + tests on PostgreSQL, migration check,
+# frontend lint/typecheck/test/build, and container image builds (never pushed).
+#
+# Third-party actions are pinned to full commit SHAs (the comment shows the release tag);
+# Dependabot (.github/dependabot.yml) proposes updates.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep in sync with the uv image in Dockerfile and the version that produced uv.lock.
+  UV_VERSION: "0.12.1"
+  FORCE_COLOR: "1"
+
+jobs:
+  backend:
+    name: Backend (ruff, mypy, pytest on PostgreSQL, migrations)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: nuvexa
+          POSTGRES_PASSWORD: nuvexa
+          POSTGRES_DB: nuvexa_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nuvexa -d nuvexa_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://nuvexa:nuvexa@localhost:5432/nuvexa_test
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies (locked)
+        run: uv sync --locked
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Mypy (strict)
+        run: uv run mypy app
+
+      - name: Migrations apply to an empty PostgreSQL database
+        env:
+          DATABASE_URL: postgresql+psycopg://nuvexa:nuvexa@localhost:5432/nuvexa_migrations
+        run: |
+          uv run python -I -c "import psycopg; c = psycopg.connect('postgresql://nuvexa:nuvexa@localhost:5432/postgres', autocommit=True); c.execute('CREATE DATABASE nuvexa_migrations'); c.close()"
+          uv run alembic upgrade head
+
+      - name: Migrations apply to an empty SQLite database (demo mode path)
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///${{ runner.temp }}/nuvexa-migrations.db
+        run: uv run alembic upgrade head
+
+      - name: Tests (PostgreSQL via TEST_DATABASE_URL)
+        run: uv run pytest --cov=app --cov-report=xml --cov-report=term
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  frontend:
+    name: Frontend (lint, typecheck, test, build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (locked)
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  docker:
+    name: Container images (build only, not pushed)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build backend image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: nuvexa-backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build frontend image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: false
+          tags: nuvexa-frontend:ci
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend

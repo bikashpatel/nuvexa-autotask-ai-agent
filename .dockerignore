@@ -1,0 +1,47 @@
+# Build context for the backend image (Dockerfile at repo root).
+# The frontend image is built from ./frontend with its own context and .dockerignore.
+
+# VCS / CI / editor
+.git
+.gitignore
+.github
+.idea
+.vscode
+**/.DS_Store
+
+# Python environments and caches
+.venv
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+coverage.xml
+htmlcov
+dist
+build
+*.egg-info
+
+# Secrets and local data (never send to the build context)
+.env
+.env.*
+data
+*.db
+*.db-journal
+*.sqlite3
+evaluation-results
+
+# Not needed in the backend image
+frontend
+tests
+docs
+infra
+*.md
+!README.md
+docker-compose*.yml
+compose*.yml
+Dockerfile
+.dockerignore
+NUVEXA-AutoTask-AI-Agent_Claude_Code_Master_Prompt.pdf
+*.pdf

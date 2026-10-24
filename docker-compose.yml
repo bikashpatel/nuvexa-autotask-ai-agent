@@ -1,0 +1,141 @@
+# NUVEXA-AutoTask-AI-Agent — local demo / development stack.
+#
+#   cp .env.example .env        # optional; every value below has a demo-safe default
+#   docker compose up --build
+#   open http://localhost:8080  # or http://localhost:${NUVEXA_WEB_PORT}
+#
+# Requires Docker Compose v2.24+ (optional env_file). This file is for local use only; the
+# production reference architecture (Azure Container Apps) is in docs/deployment.md.
+#
+# Variables in ${VAR:-default} form are read from your shell or from .env (Compose interpolation).
+# The full .env file is also passed to the backend containers; the `environment:` entries below
+# take precedence over it.
+#
+# Host ports (all bound to 127.0.0.1) are configurable when the defaults are already in use:
+#   NUVEXA_WEB_PORT (8080, dashboard)   NUVEXA_API_PORT (8000, API)   NUVEXA_DB_PORT (5432, Postgres)
+# APP_BASE_URL and OAUTH_REDIRECT_URI default to http://localhost:${NUVEXA_WEB_PORT}.
+
+name: nuvexa
+
+# Shared definition for the three backend process types (same image, different commands).
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: nuvexa-backend:local
+  env_file:
+    - path: .env
+      required: false
+  environment: &backend-env
+    APP_ENV: ${APP_ENV:-development}
+    # Demo defaults: synthetic mailbox, deterministic heuristic agent, mock Azure DevOps.
+    # No external credentials are needed with these values.
+    DEMO_MODE: ${DEMO_MODE:-true}
+    LLM_PROVIDER: ${LLM_PROVIDER:-heuristic}
+    MAIL_MODE: ${MAIL_MODE:-demo}
+    AZURE_DEVOPS_MODE: ${AZURE_DEVOPS_MODE:-mock}
+    # Always the in-network database (a DATABASE_URL in .env that points at localhost is ignored here).
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nuvexa}:${POSTGRES_PASSWORD:-nuvexa}@postgres:5432/${POSTGRES_DB:-nuvexa}
+    # The browser reaches everything through the frontend container (nginx proxies /api).
+    APP_BASE_URL: ${APP_BASE_URL:-http://localhost:${NUVEXA_WEB_PORT:-8080}}
+    OAUTH_REDIRECT_URI: ${OAUTH_REDIRECT_URI:-http://localhost:${NUVEXA_WEB_PORT:-8080}/api/v1/auth/callback}
+    LOG_FORMAT: ${LOG_FORMAT:-json}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # The dedicated worker container processes jobs; the API must not run an embedded one.
+    RUN_EMBEDDED_WORKER: "false"
+  restart: unless-stopped
+
+services:
+  # System of record: business data, job queue, LangGraph checkpoints, audit log.
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nuvexa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nuvexa}
+      POSTGRES_DB: ${POSTGRES_DB:-nuvexa}
+    volumes:
+      # PostgreSQL 18 images keep PGDATA under /var/lib/postgresql/18/docker; mount the parent.
+      - postgres-data:/var/lib/postgresql
+      # Creates nuvexa_test on first initialisation (for TEST_DATABASE_URL runs from the host).
+      - ./infra/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    ports:
+      # Published on loopback only, for host tools and `uv run ...` against this database.
+      - "127.0.0.1:${NUVEXA_DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  # One-shot schema migration (alembic upgrade head). api and worker start only after it succeeds.
+  migrate:
+    <<: *backend
+    command: ["nuvexa", "migrate"]
+    restart: "no"
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # FastAPI backend (container port 8000). The browser normally uses it through the frontend proxy;
+  # the host port is for curl / OpenAPI docs.
+  api:
+    <<: *backend
+    command: ["nuvexa", "api", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *backend-env
+      # Trust X-Forwarded-* from the nginx frontend (uvicorn proxy headers). The container is only
+      # reachable from the compose network and host loopback. Narrow it (e.g. the compose network
+      # CIDR) if you publish the API more widely.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}
+    ports:
+      - "127.0.0.1:${NUVEXA_API_PORT:-8000}:8000"
+    healthcheck:
+      # Readiness (includes the database check) so the frontend starts only when the API can serve.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; r = urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=4); sys.exit(0 if r.status == 200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+      start_interval: 2s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Background worker: claims jobs from the Postgres queue (mail sync, analysis, execution).
+  # It has no HTTP port, so the image's HTTP healthcheck is disabled here.
+  worker:
+    <<: *backend
+    command: ["nuvexa", "worker"]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # React dashboard served by nginx (unprivileged, container port 8080); proxies /api/ to
+  # http://api:8000 so the session cookie stays same-origin.
+  frontend:
+    build:
+      context: ./frontend
+    image: nuvexa-frontend:local
+    ports:
+      - "127.0.0.1:${NUVEXA_WEB_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
