@@ -1,0 +1,162 @@
+"""Durable PostgreSQL-backed job queue.
+
+* `enqueue` deduplicates on `dedupe_key` while a job with that key is queued or running.
+* `claim_next` uses `FOR UPDATE SKIP LOCKED` (PostgreSQL) and never runs two jobs with the same
+  `concurrency_key` at once (enforced by a partial unique index, so it also holds across workers).
+* Failed retryable jobs are re-queued with exponential backoff; expired leases are recovered.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import timedelta
+from typing import Any
+
+from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+
+from app.core.context import get_correlation_id
+from app.core.timeutil import utcnow
+from app.db.models import Job
+from app.domain.enums import JobStatus, JobType
+
+_ACTIVE = (JobStatus.QUEUED, JobStatus.RUNNING)
+
+
+async def enqueue(
+    session: AsyncSession,
+    *,
+    job_type: JobType,
+    payload: dict[str, Any],
+    tenant_id: uuid.UUID | None,
+    dedupe_key: str | None = None,
+    concurrency_key: str | None = None,
+    max_attempts: int = 3,
+    delay_seconds: float = 0,
+) -> Job:
+    """Add a job to the caller's transaction. Returns the existing active job for the same dedupe key."""
+    if dedupe_key:
+        existing = await _active_by_dedupe(session, dedupe_key)
+        if existing is not None:
+            return existing
+    job = Job(
+        tenant_id=tenant_id,
+        job_type=job_type,
+        payload=payload,
+        status=JobStatus.QUEUED,
+        attempts=0,
+        max_attempts=max_attempts,
+        run_after=utcnow() + timedelta(seconds=delay_seconds),
+        dedupe_key=dedupe_key,
+        concurrency_key=concurrency_key,
+        correlation_id=get_correlation_id(),
+    )
+    try:
+        async with session.begin_nested():
+            session.add(job)
+    except IntegrityError:
+        existing = await _active_by_dedupe(session, dedupe_key) if dedupe_key else None
+        if existing is None:
+            raise
+        return existing
+    return job
+
+
+async def _active_by_dedupe(session: AsyncSession, dedupe_key: str) -> Job | None:
+    stmt = select(Job).where(Job.dedupe_key == dedupe_key, Job.status.in_(_ACTIVE)).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def claim_next(session: AsyncSession, worker_id: str) -> Job | None:
+    running = aliased(Job)
+    blocked = exists().where(and_(running.status == JobStatus.RUNNING, running.concurrency_key == Job.concurrency_key))
+    stmt = (
+        select(Job)
+        .where(
+            Job.status == JobStatus.QUEUED,
+            Job.run_after <= utcnow(),
+            or_(Job.concurrency_key.is_(None), ~blocked),
+        )
+        .order_by(Job.run_after, Job.created_at)
+        .limit(1)
+        .with_for_update(skip_locked=True, of=Job)
+    )
+    job = (await session.execute(stmt)).scalar_one_or_none()
+    if job is None:
+        await session.commit()  # end the read transaction without expiring the caller's objects
+        return None
+    job.status = JobStatus.RUNNING
+    job.locked_by = worker_id
+    job.locked_at = utcnow()
+    job.attempts += 1
+    try:
+        await session.commit()
+    except IntegrityError:
+        # Another worker started a job with the same concurrency key first.
+        await session.rollback()
+        return None
+    return job
+
+
+async def complete(session: AsyncSession, job_id: uuid.UUID, result: dict[str, Any] | None = None) -> None:
+    await session.execute(
+        update(Job)
+        .where(Job.id == job_id)
+        .values(status=JobStatus.SUCCEEDED, finished_at=utcnow(), result=result or {}, locked_by=None)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+
+
+async def fail(session: AsyncSession, job: Job, error: str, *, retryable: bool) -> JobStatus:
+    if retryable and job.attempts < job.max_attempts:
+        delay = min(300, 5 * 2 ** (job.attempts - 1))
+        status, run_after, finished = JobStatus.QUEUED, utcnow() + timedelta(seconds=delay), None
+    else:
+        status, run_after, finished = (JobStatus.DEAD if retryable else JobStatus.FAILED), job.run_after, utcnow()
+    await session.execute(
+        update(Job)
+        .where(Job.id == job.id)
+        .values(
+            status=status,
+            run_after=run_after,
+            finished_at=finished,
+            last_error=error[:2000],
+            locked_by=None,
+            locked_at=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    return status
+
+
+async def heartbeat(session: AsyncSession, job_id: uuid.UUID) -> None:
+    await session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.status == JobStatus.RUNNING)
+        .values(locked_at=utcnow())
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+
+
+async def recover_expired_leases(session: AsyncSession, lease_seconds: int) -> int:
+    """Re-queue jobs whose worker died. Handlers must be safe to re-run (they are idempotent)."""
+    cutoff = utcnow() - timedelta(seconds=lease_seconds)
+    stmt = select(Job).where(Job.status == JobStatus.RUNNING, Job.locked_at < cutoff).with_for_update(skip_locked=True)
+    jobs = (await session.execute(stmt)).scalars().all()
+    for job in jobs:
+        job.locked_by = None
+        job.locked_at = None
+        if job.attempts < job.max_attempts:
+            job.status = JobStatus.QUEUED
+            job.last_error = "lease expired; re-queued"
+        else:
+            job.status = JobStatus.DEAD
+            job.finished_at = utcnow()
+            job.last_error = "lease expired; attempts exhausted"
+    await session.commit()
+    return len(jobs)
