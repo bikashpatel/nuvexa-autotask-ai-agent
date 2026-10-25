@@ -293,8 +293,7 @@ async def test_hostile_graph_delta_page_is_ingested_with_bounded_fields(
     assert detail.json()["attachments"][0]["name"].startswith("AAAA")
 
 
-# DEFECT: identifiers/addresses are stored without removing NUL or re-clipping after lowercasing; PostgreSQL
-# rejects NUL in text/varchar/jsonb and over-long varchar values, so such a message aborts the sync batch.
+# Regression (Prompt 5): identifier fields are cleaned of control characters and addresses clipped after lower-casing.
 def test_normalized_graph_message_fits_postgres_column_constraints() -> None:
     hostile = graph_message(
         "m-pg",
@@ -339,8 +338,7 @@ def _poison_upsert(monkeypatch: pytest.MonkeyPatch, poison_id: str) -> list[str]
     return seen
 
 
-# DEFECT: a database error while storing a synced batch (after the fetch) bypasses the F-18 failure handling:
-# the checkpoint stays RUNNING, last_error is empty and no mailbox_sync_failed audit event is written.
+# Regression (Prompt 5): store-phase errors and rejected messages are recorded (last_error + mailbox_sync_failed).
 async def test_database_error_while_storing_synced_mail_is_recorded_not_left_running(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -358,8 +356,7 @@ async def test_database_error_while_storing_synced_mail_is_recorded_not_left_run
     assert len(failures) == 1
 
 
-# DEFECT: one message the database cannot store (poison message) blocks every other message of the round, on
-# every retry, forever: the delta cursor never advances and the job ends DEAD.
+# Regression (Prompt 5): each message is stored in its own savepoint; one the database rejects is skipped.
 async def test_one_message_rejected_by_the_database_does_not_block_the_rest_of_the_mailbox(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -509,8 +506,7 @@ async def test_hostile_action_edits_and_review_inputs_are_rejected_without_echo(
     )
 
 
-# DEFECT: a streamed (chunked) body over MAX_REQUEST_BYTES reaches FastAPI's body parser, which turns the
-# middleware's _BodyTooLarge into "400 There was an error parsing the body" instead of the documented 413.
+# Regression (Prompt 5): the size limit is enforced before the app runs, so streamed bodies get 413 too.
 async def test_streamed_oversized_body_is_rejected_with_413(harness: Harness) -> None:
     member = await harness.persona("member")
     chunk = b" " * 65_536
@@ -526,9 +522,7 @@ async def test_streamed_oversized_body_is_rejected_with_413(harness: Harness) ->
     assert error["code"] == "request_too_large"
 
 
-# DEFECT: NUL characters in free-text request fields are stored verbatim. SQLite accepts them; PostgreSQL rejects
-# them (text: "cannot contain NUL (0x00) bytes", jsonb: "unsupported Unicode escape sequence"), so on the
-# production database these requests end in an unhandled DataError → HTTP 500 instead of a 4xx.
+# Regression (Prompt 5): RequestModel rejects NUL in any string field (422) before it reaches the database.
 async def test_nul_characters_in_review_text_are_rejected_or_removed(harness: Harness) -> None:
     member = await synced_member(harness)
     action = await _work_item(harness, member)
@@ -816,9 +810,7 @@ async def test_failed_execute_request_queues_nothing(harness: Harness, monkeypat
     assert not any(c.create_attempts for c in harness.ado.clients)
 
 
-# DEFECT (both databases): auto-analysis runs after the sync's own commit, so a transient database error there
-# fails the job *after* the new emails and the delta cursor were stored. The retry sees no "new" emails and never
-# queues their analysis (on SQLite the first email additionally keeps an orphan RECEIVED run without a job).
+# Regression (Prompt 5): auto-analysis is queued in the sync's transaction; a failure rolls the round back.
 async def test_transient_error_during_auto_analysis_does_not_skip_new_emails(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -894,9 +886,7 @@ async def test_cancelling_a_failed_analysis_finalizes_the_run(make_harness: Harn
 # ===================================================================================================
 
 
-# DEFECT (PostgreSQL only): the LangGraph checkpointer's psycopg pool is opened with its own connection kwargs
-# and gets neither statement_timeout nor lock_timeout (F-11 covers only the SQLAlchemy engine), so a checkpoint
-# read/write stuck on a lock or a runaway query pins a worker slot indefinitely.
+# Regression (Prompt 5): the checkpointer pool reuses the engine's postgres_connect_args (statement/lock timeouts).
 async def test_checkpointer_connections_get_statement_and_lock_timeouts(fake_postgres: type[_FakePool]) -> None:  # noqa: F811
     settings = make_settings("postgresql+psycopg://u:p@db:5432/nuvexa")
     async with cp.open_checkpointer(settings):

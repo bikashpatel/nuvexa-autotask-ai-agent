@@ -166,6 +166,21 @@ async def test_generic_http_errors_use_the_envelope(harness: Harness) -> None:
     assert_error(resp, 413, "request_too_large")
 
 
+async def test_nul_characters_in_request_bodies_get_the_validation_envelope(harness: Harness) -> None:
+    # Regression (Prompt 5): NUL is rejected at the boundary (PostgreSQL would raise DataError → 500), unechoed.
+    member = await harness.persona("member")
+    resp = await member.post("/emails/sync", json={"connected_account_id": "nul-canary\x00"})
+    error = assert_error(resp, 422, "validation_failed")
+    assert error["details"] == [
+        {
+            "loc": ["body", "connected_account_id"],
+            "msg": "NUL characters are not allowed in text fields",
+            "type": "nul_character",
+        }
+    ]
+    assert "nul-canary" not in resp.text
+
+
 async def test_correlation_id_is_echoed_or_replaced_when_unsafe(harness: Harness) -> None:
     resp = await harness.get("/health/live", headers={"X-Request-ID": "trace-abc-12345"})
     assert resp.headers["x-request-id"] == "trace-abc-12345"
@@ -540,7 +555,8 @@ async def test_sync_contract(harness: Harness) -> None:
     )
     assert again.job_ids == accepted.job_ids  # deduplicated while the first job is still queued
     await harness.drain()
-    assert_error(await member.post("/emails/sync", json={"connected_account_id": str(uuid.uuid4())}), 409, "conflict")
+    # Regression (Prompt 5): an unknown connection id is a 404 like every other invisible resource.
+    assert_error(await member.post("/emails/sync", json={"connected_account_id": str(uuid.uuid4())}), 404, "not_found")
     assert_error(await member.post("/emails/sync", json={"connected_account_id": "x"}), 422)
     assert_error(await member.post("/emails/sync", json={"folder": "inbox"}), 422)
     assert_error(await member.post("/emails/sync"), 422)

@@ -530,6 +530,29 @@ async def test_scheduler_recovers_leases_and_enqueues_polls(
     assert await _jobs(db, JobType.RETENTION_PURGE) == []  # first retention run is ~1h after start
 
 
+async def test_scheduler_never_polls_mailboxes_of_deactivated_users(
+    db: Database,
+    database_url: str,
+    session: AsyncSession,
+    tenant: Tenant,
+    make_user: UserFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (Prompt 5): a deactivated user's connected mailbox is not polled (their tokens stay unused).
+    active_user, deactivated = await make_user(tenant, UserRole.MEMBER), await make_user(tenant, UserRole.MEMBER)
+    polled = await _graph_account(session, active_user, ConnectionStatus.ACTIVE)
+    await _graph_account(session, deactivated, ConnectionStatus.ACTIVE)
+    deactivated.is_active = False
+    await session.commit()
+    worker = _worker(db, make_settings(database_url, mail_poll_interval_seconds=60), FakeHandlers())
+    _one_iteration(worker, monkeypatch)
+
+    await worker._scheduler()
+
+    (sync,) = await _jobs(db, JobType.SYNC_MAILBOX)
+    assert sync.payload == {"connected_account_id": str(polled.id)}
+
+
 async def test_scheduler_without_polling(
     db: Database,
     database_url: str,

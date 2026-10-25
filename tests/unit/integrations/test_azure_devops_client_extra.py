@@ -114,10 +114,10 @@ def test_html_url_and_auth_reprs(pat_settings, token_provider) -> None:
     ("response", "category", "retryable", "message"),
     [
         (
-            httpx.Response(400, json={"message": "TF\x00 bad\n request"}),
+            httpx.Response(400, json={"message": "TF\x00 bad\n request"}),  # no code: the text is never echoed
             FailureCategory.VALIDATION,
             False,
-            "TF bad request",
+            "Azure DevOps rejected the request (list work item types)",
         ),
         (httpx.Response(401, json={"message": "nope"}), FailureCategory.AUTHORIZATION, False, "authentication failed"),
         (
@@ -159,6 +159,67 @@ async def test_read_error_mapping(pat_settings, http_client, sleep, response, ca
     assert message in info.value.message
     assert len(info.value.message) < 600  # provider messages are truncated
     assert FAKE_PAT not in info.value.message
+
+
+def _echo(secret: str) -> str:
+    return f"Request headers: Authorization: Basic {secret}; PAT={secret}"
+
+
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    [
+        (
+            {
+                "message": f"TF401320: Rule Error for field Area Path. {_echo(FAKE_PAT)}",
+                "typeKey": "RuleValidationException",
+                "customProperties": {"FieldReferenceName": "System.AreaPath"},
+            },
+            ": TF401320, RuleValidationException, field System.AreaPath",
+        ),
+        ({"message": f"  VS403403: denied. {_echo(FAKE_PAT)}"}, ": VS403403"),
+        ({"message": f"{_echo(FAKE_PAT)} TF401320", "typeKey": FAKE_PAT}, ""),  # code not leading, key not a type
+        ({"message": "TF4013201234: too many digits", "typeKey": "Rule Validation Exception"}, ""),
+        ({"message": "TF401320x: glued", "typeKey": "A" * 90 + "Exception"}, ""),
+        ({"message": 42, "typeKey": ["RuleValidationException"], "customProperties": "System.Title"}, ""),
+        ({"customProperties": {"FieldReferenceName": "System.Title; " + FAKE_PAT}}, ""),
+        ({"customProperties": {"FieldReferenceName": "eyJhbGciOi." + "x" * 200 + ".sig"}}, ""),  # token-shaped
+        (
+            {"customProperties": {"FieldReferenceName": "Microsoft.VSTS.Common.Severity"}},
+            ": field Microsoft.VSTS.Common.Severity",
+        ),
+    ],
+)
+@respx.mock
+async def test_error_bodies_contribute_only_allow_listed_identifiers(
+    pat_settings, http_client, sleep, body: dict[str, Any], detail: str
+) -> None:
+    # Regression (Prompt 5): free-form Azure DevOps error text (which can echo the PAT) is never propagated.
+    respx.get(url__startswith=TYPES).mock(return_value=httpx.Response(400, json=body))
+    with pytest.raises(IntegrationError) as info:
+        await client(pat_settings, http_client, sleep).list_work_item_types("NUVEXA-Demo")
+    assert info.value.message == "Azure DevOps rejected the request (list work item types)" + detail
+    assert FAKE_PAT not in info.value.message
+    assert "Request headers" not in info.value.message
+
+
+@respx.mock
+async def test_validation_issues_carry_codes_but_never_the_error_text(pat_settings, http_client, sleep) -> None:
+    respx.post(url__regex=CREATE_BUG).mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "message": f"TF401320: Rule Error for field Severity. {_echo(FAKE_PAT)}",
+                "typeKey": "RuleValidationException",
+                "customProperties": {"FieldReferenceName": "Microsoft.VSTS.Common.Severity"},
+            },
+        )
+    )
+    result = await client(pat_settings, http_client, sleep).validate_work_item(create_request())
+    [issue] = result.issues
+    assert (issue.field, issue.message) == (
+        "Microsoft.VSTS.Common.Severity",
+        "Azure DevOps rejected the work item (TF401320, RuleValidationException)",
+    )
 
 
 @pytest.mark.parametrize("body", [b"not json", b"[1, 2]", b'"string"'])
@@ -352,7 +413,7 @@ async def test_validate_400_without_details_and_other_errors(pat_settings, http_
     with pytest.raises(IntegrationError) as forbidden:
         await ado.validate_work_item(create_request())
     assert forbidden.value.category == FailureCategory.PERMISSION
-    assert "validate work items: denied" in forbidden.value.message
+    assert forbidden.value.message == "The Azure DevOps identity is not permitted to validate work items"
     with pytest.raises(IntegrationError) as sign_in:
         await ado.validate_work_item(create_request())
     assert sign_in.value.category == FailureCategory.AUTHORIZATION

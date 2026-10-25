@@ -581,11 +581,12 @@ async def test_ids_in_request_bodies_cannot_redirect_a_write(harness: Harness) -
     assert (await member.get(f"/actions/{wi['id']}")).json()["owner_user_id"] == str(member.user_id)
 
     # Syncing someone else's mailbox (same tenant, other tenant, unknown id) looks the same and queues nothing.
+    # Regression (Prompt 5): all three are an identical 404 (invariant 5), not a 409.
     outsider_conn = (await outsider.get("/integrations")).json()["microsoft"]["connections"][0]["id"]
     messages = set()
     for account in (owned["member"].ids["connection_id"], outsider_conn, str(uuid.uuid4())):
         messages.add(
-            assert_error(await member2.post("/emails/sync", json={"connected_account_id": account}), 409)["message"]
+            assert_error(await member2.post("/emails/sync", json={"connected_account_id": account}), 404)["message"]
         )
     assert len(messages) == 1
     async with harness.db.session() as s:

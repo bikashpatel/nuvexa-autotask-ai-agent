@@ -1263,7 +1263,7 @@ def _echoing_ado_error(secrets: SyntheticSecrets) -> dict[str, str]:
     }
 
 
-# DEFECT: Azure DevOps error-body messages are stored and returned verbatim, PAT included (client.py _error)
+# Regression (Prompt 5): only allow-listed codes (TFnnnn/VSnnnn, typeKey, field ref) leave Azure DevOps error bodies.
 async def test_azure_devops_error_echoing_the_pat_is_not_persisted_returned_or_logged(
     make_harness: HarnessFactory,
     secrets: SyntheticSecrets,
@@ -1293,7 +1293,7 @@ async def test_azure_devops_error_echoing_the_pat_is_not_persisted_returned_or_l
         assert exposures(exposed, secrets.needles()) == {}
 
 
-# DEFECT: Azure DevOps error-body text (PAT included) is echoed in the 502 envelope and the app_error log
+# Regression (Prompt 5): Azure DevOps error text is never echoed; the 502 envelope and logs carry codes only.
 async def test_azure_devops_error_echoing_the_pat_is_not_returned_by_integration_endpoints(
     make_harness: HarnessFactory,
     secrets: SyntheticSecrets,

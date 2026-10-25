@@ -64,6 +64,13 @@ class CorrelationIdMiddleware:
 
 
 class RequestSizeLimitMiddleware:
+    """Answers 413 for bodies over `max_bytes` before the application sees any of the body.
+
+    The body is read (at most `max_bytes`) before the app runs and then replayed to it. Enforcing the limit
+    inside the app's `receive` instead does not work for streamed (chunked) bodies: the framework's body
+    parser catches whatever `receive` raises and answers "400 error parsing the body".
+    """
+
     def __init__(self, app: ASGIApp, max_bytes: int) -> None:
         self.app = app
         self.max_bytes = max_bytes
@@ -77,25 +84,33 @@ class RequestSizeLimitMiddleware:
         if declared is not None and declared.isdigit() and int(declared) > self.max_bytes:
             await _too_large(scope, send)
             return
+        chunks: list[bytes] = []
         received = 0
-
-        async def limited_receive() -> Message:
-            nonlocal received
+        terminal: Message | None = None  # e.g. http.disconnect before the body was complete
+        while True:
             message = await receive()
-            if message["type"] == "http.request":
-                received += len(message.get("body", b""))
-                if received > self.max_bytes:
-                    raise _BodyTooLarge
-            return message
+            if message["type"] != "http.request":
+                terminal = message
+                break
+            chunk = message.get("body", b"")
+            received += len(chunk)
+            if received > self.max_bytes:
+                await _too_large(scope, send)
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        replay: list[Message] = []
+        if chunks or terminal is None:
+            replay.append({"type": "http.request", "body": b"".join(chunks), "more_body": terminal is not None})
+        if terminal is not None:
+            replay.append(terminal)
 
-        try:
-            await self.app(scope, limited_receive, send)
-        except _BodyTooLarge:
-            await _too_large(scope, send)
+        async def replaying_receive() -> Message:
+            # The buffered body first, then the server's channel (disconnect detection for streaming responses).
+            return replay.pop(0) if replay else await receive()
 
-
-class _BodyTooLarge(Exception):
-    pass
+        await self.app(scope, replaying_receive, send)
 
 
 async def _too_large(scope: Scope, send: Send) -> None:

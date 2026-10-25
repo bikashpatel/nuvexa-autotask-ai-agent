@@ -6,7 +6,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from app.domain.enums import (
     ActionStatus,
@@ -40,8 +41,32 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+def _contains_nul(value: Any) -> bool:
+    """True when any string in a decoded JSON value (keys included) contains a NUL character."""
+    stack = [value]
+    while stack:  # iterative: request bodies may be deeply nested
+        item = stack.pop()
+        if isinstance(item, str):
+            if "\x00" in item:
+                return True
+        elif isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, list | tuple):
+            stack.extend(item)
+    return False
+
+
 class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _reject_nul_characters(cls, value: Any) -> Any:
+        # PostgreSQL text/jsonb cannot store NUL: reject it here (422) instead of failing at the database (500).
+        if _contains_nul(value):
+            raise PydanticCustomError("nul_character", "NUL characters are not allowed in text fields")
+        return value
 
 
 # --- Errors / pagination -------------------------------------------------------------------------

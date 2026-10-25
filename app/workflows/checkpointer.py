@@ -11,6 +11,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from app.core.config import Settings
+from app.db.session import postgres_connect_args
 
 
 def checkpoint_serializer() -> JsonPlusSerializer:
@@ -45,7 +46,14 @@ async def open_checkpointer(settings: Settings) -> AsyncIterator[BaseCheckpointS
             _postgres_conninfo(settings.database_url),
             min_size=1,
             max_size=max(2, settings.worker_concurrency),
-            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+            # Same statement/lock timeouts as the SQLAlchemy engine: a checkpoint read/write stuck on a lock or a
+            # runaway query must not pin a worker slot indefinitely.
+            kwargs={
+                **postgres_connect_args(settings),
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
             open=False,
         )
         await pool.open()

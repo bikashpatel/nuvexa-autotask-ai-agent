@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.exc import DataError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import Conflict, IntegrationError, IntegrationNotConfigured
+from app.core.errors import Conflict, IntegrationError, IntegrationNotConfigured, NotFound
 from app.core.timeutil import utcnow
 from app.db.models import ConnectedAccount, CredentialRecord, EmailMessage, EmailSyncCheckpoint, WorkflowRun
 from app.domain.enums import (
@@ -32,6 +34,7 @@ from app.services import email_sync_service
 from app.services.authz import AuditedPermissionDenied, Perm
 from app.services.email_sync_service import INBOX, EmailSyncService, _recipients, apply_normalized
 from app.services.settings_service import load_settings_row
+from app.services.workflow_service import WorkflowService
 from tests.unit.services.conftest import RECEIVED_AT, Factory, Fresh, World
 
 SENT_AT = datetime(2026, 10, 1, 9, 29, tzinfo=UTC)
@@ -227,14 +230,38 @@ async def test_request_sync_rejects_other_users_account_and_missing_mailbox(
     session: AsyncSession, settings: Settings, factory: Factory, world: World, fresh: Fresh
 ) -> None:
     service = EmailSyncService(settings)
-    with pytest.raises(Conflict, match="No connected mailbox"):
+    # Regression (Prompt 5): another user's (or an unknown) connection is invisible: 404, never a 409.
+    with pytest.raises(NotFound, match="Mailbox connection not found"):
         await service.request_sync(session, world.actor(world.owner), (await factory.account(world.other)).id)
     with pytest.raises(Conflict, match="No connected mailbox"):
         await service.request_sync(session, world.actor(world.approver), None)
-    with pytest.raises(Conflict):
+    with pytest.raises(NotFound, match="Mailbox connection not found"):
         await service.request_sync(session, world.actor(world.owner), uuid.uuid4())
     assert await fresh.jobs() == []
     assert await fresh.audits("mailbox_sync_requested") == []
+
+
+@pytest.mark.parametrize(
+    ("provider", "status"),
+    [
+        (ConnectionProvider.MICROSOFT_GRAPH, ConnectionStatus.NEEDS_REAUTH),
+        (ConnectionProvider.MICROSOFT_GRAPH, ConnectionStatus.DISCONNECTED),
+        (ConnectionProvider.AZURE_DEVOPS, ConnectionStatus.ACTIVE),  # the user's own, but not a mailbox
+    ],
+)
+async def test_request_sync_of_an_own_connection_that_cannot_sync_is_a_conflict(
+    session: AsyncSession,
+    settings: Settings,
+    factory: Factory,
+    world: World,
+    fresh: Fresh,
+    provider: ConnectionProvider,
+    status: ConnectionStatus,
+) -> None:
+    own = await factory.account(world.owner, provider, status=status)
+    with pytest.raises(Conflict, match="No connected mailbox"):
+        await EmailSyncService(settings).request_sync(session, world.actor(world.owner), own.id)
+    assert await fresh.jobs() == []
 
 
 # ---------------------------------------------------------------------------------------------
@@ -691,3 +718,207 @@ async def test_sync_failure_is_recorded_when_the_provider_used_the_session(
     assert cp.last_error == "refresh token revoked"
     [event] = await fresh.audits("mailbox_sync_failed")
     assert event.details == {"category": "authorization"}
+
+
+# ---------------------------------------------------------------------------------------------
+# Regression (Prompt 5): store-phase failures, rejected messages, deactivated owners, column limits
+# ---------------------------------------------------------------------------------------------
+
+POISON = "POISON-SUBJECT"
+
+
+class LogRecorder:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, Any]]] = []
+
+    def __getattr__(self, level: str) -> Callable[..., None]:
+        def record(event: str, **kw: Any) -> None:
+            self.records.append((level, event, kw))
+
+        return record
+
+
+@contextmanager
+def database_rejects_poison(session: AsyncSession) -> Iterator[list[str]]:
+    """The database rejects any email_messages write carrying POISON (as PostgreSQL does for NUL bytes)."""
+    rejected: list[str] = []
+
+    def before(conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, many: bool) -> None:
+        verb = statement.lstrip().split(maxsplit=1)[0]
+        if "email_messages" in statement and verb in ("INSERT", "UPDATE") and POISON in repr(parameters):
+            rejected.append(verb)
+            raise DataError(statement, parameters, ValueError("PostgreSQL text fields cannot contain NUL bytes"))
+
+    engine = session.bind.sync_engine  # type: ignore[union-attr]
+    event.listen(engine, "before_cursor_execute", before)
+    try:
+        yield rejected
+    finally:
+        event.remove(engine, "before_cursor_execute", before)
+
+
+async def test_messages_the_database_rejects_are_skipped_and_recorded_without_content(
+    session: AsyncSession,
+    settings: Settings,
+    factory: Factory,
+    world: World,
+    fresh: Fresh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = await factory.email(world.account, provider_message_id="p-old", change_key="ck-0", subject="Original")
+    old_id = old.id  # the rejected update expires the (shared) identity-mapped row
+    batch = MailChangeSet(
+        upserts=[_msg("p-1"), _msg("p-bad", subject=POISON), _msg("p-old", change_key="ck-2", subject=POISON)],
+        delta_link="delta-1",
+    )
+    _install(monkeypatch, FakeProvider(batch))
+    recorder = LogRecorder()
+    monkeypatch.setattr(email_sync_service, "log", recorder)
+
+    with database_rejects_poison(session) as rejected:
+        result = await EmailSyncService(settings).sync_account(session, world.account.id)
+
+    assert rejected == ["INSERT", "UPDATE"]  # the new message and the update were each rejected by the database
+    assert (result.inserted, result.updated, result.skipped) == (1, 0, 2)
+    assert result.new_email_ids == [(await _email_by_pid(fresh, world.account, "p-1")).id]
+    assert await fresh.all(EmailMessage, EmailMessage.provider_message_id == "p-bad") == []
+    unchanged = await fresh.get(EmailMessage, old_id)
+    assert unchanged is not None
+    assert (unchanged.subject, unchanged.change_key) == ("Original", "ck-0")
+    cp = await _checkpoint(fresh, world.account)
+    assert (cp.last_status, cp.delta_link, cp.messages_ingested_total) == (SyncStatus.SUCCEEDED, "delta-1", 1)
+    assert cp.last_error == "2 message(s) could not be stored and were skipped."
+    [synced] = await fresh.audits("mailbox_synced")
+    assert synced.details == {"inserted": 1, "updated": 0, "removed": 0, "truncated": False}
+    [failed] = await fresh.audits("mailbox_sync_failed")
+    assert failed.outcome is AuditOutcome.FAILURE
+    assert failed.details == {"category": "validation", "skipped_messages": 2}
+    assert [r for r in recorder.records if r[1] == "mail_message_not_stored"] == [
+        ("warning", "mail_message_not_stored", {"account_id": str(world.account.id), "error_type": "DataError"})
+    ] * 2
+    assert POISON not in repr(recorder.records)
+
+
+async def test_database_error_while_storing_rolls_the_round_back_and_is_retried(
+    session: AsyncSession,
+    settings: Settings,
+    world: World,
+    fresh: Fresh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _enable_auto_analyze(session, settings, world)
+    account_id, fixture_run_id = world.account.id, world.run.id  # the failed round's rollback expires the fixtures
+    batch = MailChangeSet(upserts=[_msg("p-1"), _msg("p-2")], delta_link="delta-1")
+    provider = FakeProvider(batch, batch)
+    _install(monkeypatch, provider)
+    real = WorkflowService.create_run
+    calls: list[uuid.UUID] = []
+
+    async def create_run(self: WorkflowService, s: AsyncSession, email: EmailMessage, **kw: Any) -> Any:
+        calls.append(email.id)
+        if len(calls) == 2:
+            raise OperationalError("INSERT INTO workflow_runs ...", {}, Exception("database is locked"))
+        return await real(self, s, email, **kw)
+
+    monkeypatch.setattr(WorkflowService, "create_run", create_run)
+    recorder = LogRecorder()
+    monkeypatch.setattr(email_sync_service, "log", recorder)
+    service = EmailSyncService(settings)
+
+    with pytest.raises(IntegrationError) as info:
+        await service.sync_account(session, account_id)
+
+    assert (info.value.category, info.value.retryable) == (FailureCategory.TRANSIENT, True)
+    assert isinstance(info.value.__cause__, OperationalError)
+    assert (
+        "error",
+        "mail_sync_store_failed",
+        {"account_id": str(account_id), "error_type": "OperationalError"},
+    ) in (recorder.records)
+    # Nothing of the round was kept: no emails, no runs, the cursor did not move.
+    assert await fresh.all(EmailMessage, EmailMessage.provider_message_id.in_(["p-1", "p-2"])) == []
+    assert await fresh.all(WorkflowRun, WorkflowRun.id != fixture_run_id) == []
+    cp = await _checkpoint(fresh, world.account)
+    assert (cp.last_status, cp.delta_link) == (SyncStatus.FAILED, None)
+    assert cp.last_error == "Storing the synchronized mail failed; the round will be retried."
+    [failure] = await fresh.audits("mailbox_sync_failed")
+    assert failure.details == {"category": "transient"}
+    assert await fresh.audits("mailbox_synced") == []
+
+    result = await service.sync_account(session, account_id)  # the retry re-fetches the same round
+
+    assert [c[0] for c in provider.calls] == [None, None]
+    assert result.inserted == 2
+    runs = await fresh.all(WorkflowRun, WorkflowRun.id != fixture_run_id)
+    assert sorted(r.email_message_id for r in runs) == sorted(result.new_email_ids)
+    assert (await _checkpoint(fresh, world.account)).delta_link == "delta-1"
+
+
+async def test_unexpected_error_while_storing_is_recorded_as_internal(
+    session: AsyncSession, settings: Settings, world: World, fresh: Fresh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install(monkeypatch, FakeProvider(MailChangeSet(upserts=[_msg("p-1")], delta_link="delta-1")))
+
+    async def broken(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError(f"bug while storing {POISON}")
+
+    monkeypatch.setattr(EmailSyncService, "_upsert", broken)
+    with pytest.raises(IntegrationError) as info:
+        await EmailSyncService(settings).sync_account(session, world.account.id)
+    assert (info.value.category, info.value.retryable) == (FailureCategory.INTERNAL, False)
+    assert info.value.message == "Mailbox synchronization failed unexpectedly."
+    cp = await _checkpoint(fresh, world.account)
+    assert (cp.last_status, cp.delta_link) == (SyncStatus.FAILED, None)
+    assert POISON not in (cp.last_error or "")
+    [failure] = await fresh.audits("mailbox_sync_failed")
+    assert failure.details == {"category": "internal"}
+
+
+async def test_removed_ids_with_control_characters_are_ignored(
+    session: AsyncSession,
+    settings: Settings,
+    factory: Factory,
+    world: World,
+    fresh: Fresh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    email = await factory.email(world.account, provider_message_id="p-1")
+    provider = FakeProvider(
+        MailChangeSet(removed_provider_ids=["p-1\x00"]),  # unusable only: no query at all
+        MailChangeSet(removed_provider_ids=["p-1\x00", "x" * 600, "p-1"]),
+    )
+    _install(monkeypatch, provider)
+    service = EmailSyncService(settings)
+
+    assert (await service.sync_account(session, world.account.id)).removed == 0
+    assert (await service.sync_account(session, world.account.id)).removed == 1
+    stored = await fresh.get(EmailMessage, email.id)
+    assert stored is not None
+    assert stored.deleted_at is not None
+
+
+async def test_sync_account_refuses_mailboxes_of_deactivated_users(
+    session: AsyncSession, settings: Settings, world: World, fresh: Fresh, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install(monkeypatch, FakeProvider(MailChangeSet(upserts=[_msg("p-1")])))
+    world.owner.is_active = False
+    await session.commit()
+
+    with pytest.raises(Conflict, match="deactivated"):
+        await EmailSyncService(settings).sync_account(session, world.account.id)
+
+    assert built == []  # the provider (and with it the stored tokens) is never touched
+    assert await fresh.all(EmailSyncCheckpoint) == []
+    assert await fresh.all(EmailMessage, EmailMessage.provider_message_id == "p-1") == []
+
+
+def test_addresses_are_lowercased_before_they_are_clipped_to_the_column() -> None:
+    long_address = "İ" * 300 + "@Example.com"  # "İ".lower() is two code points
+    email = EmailMessage(content_hash="")
+    apply_normalized(
+        email,
+        _msg(sender=EmailAddress(name="Eve", address=long_address), to_recipients=[EmailAddress(address=long_address)]),
+    )
+    assert email.sender_address == long_address.lower()[:320]
+    assert len(email.sender_address) == 320
+    assert email.to_recipients == [{"name": None, "address": long_address.lower()[:320]}]

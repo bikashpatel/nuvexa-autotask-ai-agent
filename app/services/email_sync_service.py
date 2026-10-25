@@ -6,12 +6,13 @@ import uuid
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
+from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import Conflict, IntegrationError
+from app.core.errors import Conflict, IntegrationError, NotFound
 from app.core.timeutil import utcnow
-from app.db.models import ConnectedAccount, EmailMessage, EmailSyncCheckpoint
+from app.db.models import ConnectedAccount, EmailMessage, EmailSyncCheckpoint, User
 from app.domain.enums import (
     AuditOutcome,
     ConnectionStatus,
@@ -22,9 +23,10 @@ from app.domain.enums import (
     WorkflowTrigger,
 )
 from app.integrations.microsoft_graph.factory import build_mailbox_provider
+from app.integrations.microsoft_graph.normalize import usable_message_id
 from app.observability.logging import get_logger
 from app.observability.tracing import start_span
-from app.schemas.email import NormalizedEmail
+from app.schemas.email import MailChangeSet, NormalizedEmail
 from app.services.audit import record_audit
 from app.services.authz import Actor, Perm, require
 from app.services.settings_service import get_tenant_settings
@@ -34,6 +36,7 @@ from app.workers.queue import enqueue
 log = get_logger(__name__)
 
 INBOX = "inbox"
+_MAX_ADDRESS = 320  # EmailMessage.sender_address is varchar(320)
 
 
 @dataclass
@@ -43,15 +46,20 @@ class SyncResult:
     updated: int = 0
     removed: int = 0
     truncated: bool = False
+    skipped: int = 0  # messages the database rejected: not stored, the rest of the round was
     new_email_ids: list[uuid.UUID] = field(default_factory=list)
+
+
+def _address(value: str | None) -> str | None:
+    """Lower-cased, then clipped: lower-casing can lengthen a string ("\u0130".lower() is two code points)."""
+    return value.lower()[:_MAX_ADDRESS] if value else None
 
 
 def _recipients(items: list[object]) -> list[dict[str, str | None]]:
     out = []
     for r in items:
         name = getattr(r, "name", None)
-        address = getattr(r, "address", None)
-        out.append({"name": name, "address": address.lower() if address else None})
+        out.append({"name": name, "address": _address(getattr(r, "address", None))})
     return out
 
 
@@ -64,7 +72,7 @@ def apply_normalized(email: EmailMessage, msg: NormalizedEmail) -> bool:
     email.change_key = msg.change_key
     email.subject = msg.subject
     email.sender_name = msg.sender.name if msg.sender else None
-    email.sender_address = msg.sender.address.lower() if msg.sender and msg.sender.address else None
+    email.sender_address = _address(msg.sender.address) if msg.sender else None
     email.to_recipients = _recipients(list(msg.to_recipients))
     email.cc_recipients = _recipients(list(msg.cc_recipients))
     email.received_at = msg.received_at
@@ -91,9 +99,17 @@ class EmailSyncService:
         self, session: AsyncSession, actor: Actor, connected_account_id: uuid.UUID | None
     ) -> list[uuid.UUID]:
         require(actor, Perm.EMAIL_SYNC, resource_type="mailbox")
-        stmt = select(ConnectedAccount).where(
+        own = (
             ConnectedAccount.tenant_id == actor.tenant_id,
             ConnectedAccount.user_id == actor.user_id,  # only the user's own mailboxes
+        )
+        if connected_account_id is not None:
+            visible = select(ConnectedAccount.id).where(*own, ConnectedAccount.id == connected_account_id)
+            if (await session.execute(visible)).scalar_one_or_none() is None:
+                # Someone else's (or an unknown) connection is invisible: the same 404 as any other resource.
+                raise NotFound("Mailbox connection not found.")
+        stmt = select(ConnectedAccount).where(
+            *own,
             ConnectedAccount.status == ConnectionStatus.ACTIVE,
             ConnectedAccount.provider.in_(["microsoft_graph", "demo_mailbox"]),
         )
@@ -129,6 +145,10 @@ class EmailSyncService:
         account = await session.get(ConnectedAccount, account_id)
         if account is None or account.status is not ConnectionStatus.ACTIVE:
             raise Conflict("Mailbox connection is not active.")
+        owner = await session.get(User, account.user_id)
+        if owner is None or not owner.is_active:
+            # A deactivated user's mailbox is not read and their stored tokens are not used.
+            raise Conflict("The mailbox owner's account is deactivated.")
         checkpoint = await self._checkpoint(session, account)
         checkpoint.last_status = SyncStatus.RUNNING
         checkpoint.last_sync_started_at = utcnow()
@@ -166,15 +186,59 @@ class EmailSyncService:
                 await self._record_failure(session, account_id, generic)
                 raise generic from exc
 
+            try:
+                await self._store(session, account, changes, result)
+            except Exception as exc:
+                # Never log the exception text: SQLAlchemy errors embed statement parameters (email content).
+                log.error("mail_sync_store_failed", account_id=str(account_id), error_type=type(exc).__name__)
+                await session.rollback()  # expires `account`: use the plain id from here on
+                failure = (
+                    IntegrationError(
+                        "Storing the synchronized mail failed; the round will be retried.",
+                        category=FailureCategory.TRANSIENT,
+                        retryable=True,
+                    )
+                    if isinstance(exc, SQLAlchemyError)
+                    else IntegrationError(
+                        "Mailbox synchronization failed unexpectedly.", category=FailureCategory.INTERNAL
+                    )
+                )
+                await self._record_failure(session, account_id, failure)
+                raise failure from exc
+        return result
+
+    async def _store(
+        self, session: AsyncSession, account: ConnectedAccount, changes: MailChangeSet, result: SyncResult
+    ) -> None:
+        """Store one round in one transaction: cursor, messages (a savepoint each), removals, audit, auto-analysis.
+
+        A failure anywhere rolls all of it back, so the delta cursor stays put and the retry re-fetches and
+        re-stores the same round, new emails and their auto-analysis included, instead of silently skipping it.
+        """
+        checkpoint = await self._checkpoint(session, account)
+        checkpoint.delta_link = changes.delta_link
+        checkpoint.last_status = SyncStatus.SUCCEEDED
+        checkpoint.last_sync_completed_at = utcnow()
+        checkpoint.last_error = None
+        # Flushed before the first savepoint on purpose: pysqlite opens a transaction only for DML, so a
+        # SAVEPOINT issued first would start (and its RELEASE commit) a transaction of its own on SQLite.
+        await session.flush()
         for msg in changes.upserts:
-            await self._upsert(session, account, msg, result)
-        if changes.removed_provider_ids:
+            try:
+                async with session.begin_nested():
+                    await self._upsert(session, account, msg, result)
+            except (DataError, IntegrityError) as exc:
+                # One message the database cannot store must not block the rest of the mailbox forever.
+                result.skipped += 1
+                log.warning("mail_message_not_stored", account_id=str(account.id), error_type=type(exc).__name__)
+        removed_ids = [pid for pid in changes.removed_provider_ids if usable_message_id(pid)]
+        if removed_ids:
             removed = (
                 (
                     await session.execute(
                         select(EmailMessage).where(
                             EmailMessage.connected_account_id == account.id,
-                            EmailMessage.provider_message_id.in_(changes.removed_provider_ids),
+                            EmailMessage.provider_message_id.in_(removed_ids),
                             EmailMessage.deleted_at.is_(None),
                         )
                     )
@@ -186,11 +250,6 @@ class EmailSyncService:
                 email.deleted_at = utcnow()
             result.removed = len(removed)
         result.truncated = changes.truncated
-        checkpoint = await self._checkpoint(session, account)
-        checkpoint.delta_link = changes.delta_link
-        checkpoint.last_status = SyncStatus.SUCCEEDED
-        checkpoint.last_sync_completed_at = utcnow()
-        checkpoint.last_error = None
         checkpoint.messages_ingested_total += result.inserted
         record_audit(
             session,
@@ -205,11 +264,20 @@ class EmailSyncService:
                 "truncated": result.truncated,
             },
         )
-        await session.commit()
-
+        if result.skipped:
+            checkpoint.last_error = f"{result.skipped} message(s) could not be stored and were skipped."
+            record_audit(
+                session,
+                tenant_id=account.tenant_id,
+                event_type="mailbox_sync_failed",
+                resource_type="connected_account",
+                resource_id=account.id,
+                outcome=AuditOutcome.FAILURE,
+                details={"category": FailureCategory.VALIDATION.value, "skipped_messages": result.skipped},
+            )
         if result.new_email_ids:
             await self._auto_analyze(session, account, result.new_email_ids)
-        return result
+        await session.commit()
 
     async def _upsert(
         self, session: AsyncSession, account: ConnectedAccount, msg: NormalizedEmail, result: SyncResult
@@ -242,6 +310,7 @@ class EmailSyncService:
         content_changed = apply_normalized(existing, msg)
         if content_changed and existing.analysis_status is not EmailAnalysisStatus.NOT_ANALYZED:
             existing.content_changed_since_analysis = True
+        await session.flush()  # inside the caller's savepoint: a rejected update is attributed to this message
         result.updated += 1
 
     async def _checkpoint(self, session: AsyncSession, account: ConnectedAccount) -> EmailSyncCheckpoint:
@@ -286,6 +355,7 @@ class EmailSyncService:
         await session.commit()
 
     async def _auto_analyze(self, session: AsyncSession, account: ConnectedAccount, email_ids: list[uuid.UUID]) -> None:
+        """Queue analysis of new emails in the caller's transaction, so it commits together with the emails."""
         ts = await get_tenant_settings(session, account.tenant_id, self.settings)
         if not ts.auto_analyze_new_emails:
             return
@@ -294,4 +364,3 @@ class EmailSyncService:
             email = await session.get(EmailMessage, email_id)
             if email is not None:
                 await workflows.create_run(session, email, requested_by=None, trigger=WorkflowTrigger.AUTO)
-        await session.commit()

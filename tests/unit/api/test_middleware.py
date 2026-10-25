@@ -244,6 +244,58 @@ async def test_lying_content_length_is_still_enforced() -> None:
     assert_413(sent, None)
 
 
+async def test_streamed_body_over_limit_never_reaches_the_app() -> None:
+    # Regression (Prompt 5): the limit is enforced before the app runs, so a framework body parser cannot
+    # swallow it and answer 400; an app that would not even read the body never runs either.
+    calls: list[str] = []
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        calls.append("called")
+
+    sent = Sent()
+    await RequestSizeLimitMiddleware(app, max_bytes=1024)(
+        http_scope(state={"correlation_id": "cid-streamed"}), body_receiver(b"a" * 1000, b"b" * 25), sent
+    )
+    assert calls == []
+    assert_413(sent, "cid-streamed")
+
+
+async def test_body_is_replayed_in_one_message_then_the_server_channel_is_used() -> None:
+    received: list[Message] = []
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        received.extend([await receive(), await receive()])
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+
+    sent = Sent()
+    await RequestSizeLimitMiddleware(app, max_bytes=1024)(http_scope(), body_receiver(b"a" * 512, b"b" * 512), sent)
+    assert received == [
+        {"type": "http.request", "body": b"a" * 512 + b"b" * 512, "more_body": False},
+        {"type": "http.disconnect"},  # what the server's channel says once the body is complete
+    ]
+    assert sent.start["status"] == 204
+
+
+async def test_client_disconnect_mid_body_is_passed_on_to_the_app() -> None:
+    received: list[Message] = []
+    messages: list[Message] = [
+        {"type": "http.request", "body": b"partial", "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+
+    async def receive() -> Message:
+        return messages.pop(0)
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        received.extend([await receive(), await receive()])
+
+    await RequestSizeLimitMiddleware(app, max_bytes=1024)(http_scope(), receive, Sent())
+    assert received == [
+        {"type": "http.request", "body": b"partial", "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+
+
 async def test_non_body_messages_are_not_counted() -> None:
     seen: dict[str, Any] = {}
 
