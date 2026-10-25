@@ -230,7 +230,7 @@ Defects found in earlier phases (Prompt 1, F-01…F-25) are in [SECURITY_AUDIT.m
 |---|---|---|
 | Live integrations never exercised (§8) | Behaviour of real Entra, Graph, Azure DevOps and LLM providers may differ from the fakes | Run §8 against sandbox tenants before production |
 | Delegated (Entra) reconciliation uses the acting user's token; WIQL returns only items that user can read (not verified) | A reconciler who cannot read the target area path would see "absent" → `failed`; a retry could create a duplicate | Use the PAT/service connection for production, or ensure approvers can read the configured area paths; verify in §8 |
-| R-1 Rate limiting is per process | Limits multiply with replicas | Shared limit at the ingress/API gateway before multi-replica deployment |
+| R-1 Rate limiting — **mitigated (opt-in)** | With the default `RATE_LIMIT_BACKEND=memory` limits multiply with replicas (a production API logs `rate_limits_are_per_process`) | Set `RATE_LIMIT_BACKEND=database` (shared counters in PostgreSQL, keyed by HMAC digests) on every replica, or limit at the ingress |
 | R-2 Injection screening is English-only (5 strict xfails) | Non-English or homoglyph overrides are not flagged | Screening never grants anything; humans approve every action; destinations fixed by policy |
 | R-3 Audit HMAC detects modification, not deletion by a database superuser | Silent removal of audit rows by a DBA | Restrict superuser access; PostgreSQL audit logging and backups |
 | R-4 Runtime database role — **mitigated** | API and worker now connect as a DML-only role (`nuvexa_app`; no DDL, no TRUNCATE, no UPDATE on `audit_events`); migrations run as the owner; `nuvexa migrate` re-applies the grants on every release. Remaining: the role keeps DELETE on `audit_events` for the retention purge | Production: create the runtime role and split the secrets as in [deployment.md](deployment.md) §Database |
@@ -294,6 +294,6 @@ are documented, owned by a role, and mostly operational.
 1. The live integration tests in §8 pass against sandbox tenants (in particular the Azure DevOps
    reconcile path under delegated tokens).
 2. Branch protection requires `CI gate`; exception owners and the bootstrap administrator are named.
-3. The runtime database role and secret split (R-4, implemented) are applied in the target environment and, for more than one replica, R-1 (shared rate limit) is done.
+3. The runtime database role and secret split (R-4, implemented) are applied in the target environment and, for more than one replica, `RATE_LIMIT_BACKEND=database` is set (R-1).
 4. The configured LLM's quality is evaluated on representative, consented mail.
 5. SEC-EX-004 is closed (uv cooldown enabled) or renewed with review before 2026-11-02.

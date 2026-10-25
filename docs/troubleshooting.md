@@ -176,9 +176,14 @@ reconcile later.
 
 ## Rate limits (`429`)
 
-* `429 rate_limited` from NUVEXA's own API: the in-process limiter on auth, sync, analyze, approve and
-  execute routes. Wait and retry; it is per replica. `RATE_LIMIT_ENABLED=false` only for local load
-  testing.
+* `429 rate_limited` from NUVEXA's own API: the limiter on auth, sync, analyze, approve and execute
+  routes; wait for the `Retry-After` seconds. With `RATE_LIMIT_BACKEND=memory` (default) limits are per
+  replica, with `database` they are shared. `RATE_LIMIT_ENABLED=false` only for local load testing.
+* `429` with `Retry-After: 5` on sign-in while the database is unreachable: the shared limiter fails
+  closed for anonymous sign-in routes (`rate_limit_backend_unavailable` in the logs).
+* `password authentication failed for user "nuvexa_app"` (API or worker): the runtime database role is
+  missing or its password differs — see docs/deployment.md §Database (locally the `db-roles` Compose
+  service creates it).
 * `429` from Graph, Azure DevOps or the LLM provider is retried with backoff (honouring
   `Retry-After`). Persistent throttling: lower `WORKER_CONCURRENCY`, `MAIL_SYNC_MAX_MESSAGES` or the
   poll frequency.
