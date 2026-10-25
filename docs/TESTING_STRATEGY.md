@@ -32,7 +32,7 @@ exactly one layer and layers can be run independently.
 | Evaluation | `tests/evaluation/` | `uv run pytest -m evaluation` | 44 | ~5 s | Offline AI baseline on the labelled synthetic dataset |
 | PostgreSQL | same files | `TEST_DATABASE_URL=postgresql+psycopg://… uv run pytest` | all + `postgres`-marked concurrency tests | ~5–9 min | Triggers, row locks, `SKIP LOCKED`, partial unique indexes, timeouts |
 | Frontend | `frontend/src/**/*.test.ts(x)` | `npm test` / `npm run test:coverage` | 1,329 | ~20 s | Every component/page/hook/API function; a11y (axe); no optimistic writes; XSS inertness |
-| System E2E | `e2e/` | `scripts/e2e.sh` | 37 | ~1–2 min + build | Real containers (nginx, API, worker, PostgreSQL), restarts, DB invariants, Playwright UI |
+| System E2E | `e2e/` | `scripts/e2e.sh` | 41 | ~1–2 min + build | Real containers (nginx, API, worker, PostgreSQL), restarts, DB invariants, Playwright UI |
 
 The default `uv run pytest` runs unit + integration + security + evaluation on SQLite with no network and
 no paid calls. E2E needs Docker and is run separately (and in the opt-in CI `e2e` job).

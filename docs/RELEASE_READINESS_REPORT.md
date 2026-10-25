@@ -233,7 +233,7 @@ Defects found in earlier phases (Prompt 1, F-01…F-25) are in [SECURITY_AUDIT.m
 | R-1 Rate limiting is per process | Limits multiply with replicas | Shared limit at the ingress/API gateway before multi-replica deployment |
 | R-2 Injection screening is English-only (5 strict xfails) | Non-English or homoglyph overrides are not flagged | Screening never grants anything; humans approve every action; destinations fixed by policy |
 | R-3 Audit HMAC detects modification, not deletion by a database superuser | Silent removal of audit rows by a DBA | Restrict superuser access; PostgreSQL audit logging and backups |
-| R-4 One database role for migrations and runtime | A compromised API could alter schema | Separate DML-only runtime role before production |
+| R-4 Runtime database role — **mitigated** | API and worker now connect as a DML-only role (`nuvexa_app`; no DDL, no TRUNCATE, no UPDATE on `audit_events`); migrations run as the owner; `nuvexa migrate` re-applies the grants on every release. Remaining: the role keeps DELETE on `audit_events` for the retention purge | Production: create the runtime role and split the secrets as in [deployment.md](deployment.md) §Database |
 | Bootstrap admin by e-mail before first sign-in | Another principal in an allowed tenant with a listed e-mail could claim admin before the named person signs in | Sign the administrator in right after deployment, then clear `BOOTSTRAP_ADMIN_EMAILS`; consider bootstrap by object id |
 | No separation of duties | A member approves and executes their own proposals; approvers can edit and approve others' | Product decision; document in the operating procedure or add a "four-eyes" setting |
 | Approvals survive the approver's demotion/deactivation | A queued execution may run on an approval whose approver lost the role | Product decision; re-approval on role change is a possible follow-up |
@@ -294,6 +294,6 @@ are documented, owned by a role, and mostly operational.
 1. The live integration tests in §8 pass against sandbox tenants (in particular the Azure DevOps
    reconcile path under delegated tokens).
 2. Branch protection requires `CI gate`; exception owners and the bootstrap administrator are named.
-3. R-4 (separate runtime database role) and, for more than one replica, R-1 (shared rate limit) are done.
+3. The runtime database role and secret split (R-4, implemented) are applied in the target environment and, for more than one replica, R-1 (shared rate limit) is done.
 4. The configured LLM's quality is evaluated on representative, consented mail.
 5. SEC-EX-004 is closed (uv cooldown enabled) or renewed with review before 2026-11-02.
