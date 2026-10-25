@@ -30,7 +30,7 @@ import {
   IconRefresh,
   IconShieldCheck,
 } from '@tabler/icons-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import type { ApiError } from '../../api/client';
 import type { ActionDetail, ActionType, ApprovalOut, ExecutionOut } from '../../api/types';
@@ -41,6 +41,7 @@ import { StatusBadge } from '../../components/StatusBadge';
 import { TimeText } from '../../components/TimeText';
 import { JsonBlock } from '../../components/JsonBlock';
 import { TARGET_LABELS, actionTypeLabel, formatLatency, humanize, shortHash } from '../../lib/format';
+import { isOwnKey, lookup } from '../../lib/lookup';
 import { ActionEditor } from './ActionEditors';
 import { useActionDetail, useActionHistory, type QueuedWatch } from './hooks';
 
@@ -87,9 +88,15 @@ export function CurrentApproval({ action }: { action: ActionDetail }) {
       icon={current ? <IconShieldCheck size={18} aria-hidden /> : <IconAlertTriangle size={18} aria-hidden />}
       p="sm"
       title={
-        current
-          ? `${approval.decision === 'approved' ? 'Approved' : 'Rejected'} by ${who}`
-          : `Approval by ${who} is no longer valid`
+        current ? (
+          <>
+            {approval.decision === 'approved' ? 'Approved' : 'Rejected'} by <bdi>{who}</bdi>
+          </>
+        ) : (
+          <>
+            Approval by <bdi>{who}</bdi> is no longer valid
+          </>
+        )
       }
     >
       <Stack gap={4}>
@@ -135,7 +142,7 @@ function ApprovalHistory({ approvals }: { approvals: ApprovalOut[] }) {
           </Badge>
           <Stack gap={0} style={{ flex: 1, minWidth: 200 }}>
             <Text size="sm" className={approval.invalidated_at ? 'nuvexa-invalidated' : undefined}>
-              {approval.decided_by_name ?? 'Reviewer'} · v{approval.action_version} ·{' '}
+              <bdi>{approval.decided_by_name ?? 'Reviewer'}</bdi> · v{approval.action_version} ·{' '}
               <Code fz="xs">{shortHash(approval.payload_hash)}</Code> ·{' '}
               <TimeText value={approval.created_at} size="sm" />
             </Text>
@@ -254,7 +261,8 @@ function ActionAuditHistory({ actionId }: { actionId: string }) {
             {humanize(event.event_type)}
           </Text>
           <Text size="xs" c="dimmed">
-            {event.actor_name ?? humanize(event.actor_type)} · <TimeText value={event.created_at} size="xs" />
+            <bdi>{event.actor_name ?? humanize(event.actor_type)}</bdi> ·{' '}
+            <TimeText value={event.created_at} size="xs" />
           </Text>
         </Group>
       ))}
@@ -264,7 +272,15 @@ function ActionAuditHistory({ actionId }: { actionId: string }) {
 
 export function ActionCard({ actionId, focused = false }: { actionId: string; focused?: boolean }) {
   const [watch, setWatch] = useState<QueuedWatch | null>(null);
+  // Polling for a queued job stops at `watch.until` (hooks.ts); from then on the card must not claim
+  // that the status is live, and the decision buttons go back to what the action's permissions allow.
+  const [watchExpired, setWatchExpired] = useState(false);
   const query = useActionDetail(actionId, { watch });
+  useEffect(() => {
+    if (!watch) return undefined;
+    const timer = window.setTimeout(() => setWatchExpired(true), watch.until - Date.now());
+    return () => window.clearTimeout(timer);
+  }, [watch]);
   const [conflict, setConflict] = useState<ApiError | null>(null);
   const [saveNotice, setSaveNotice] = useState<SaveNotice | null>(null);
   const [reloading, setReloading] = useState(false);
@@ -287,11 +303,14 @@ export function ActionCard({ actionId, focused = false }: { actionId: string; fo
   }
 
   const action = query.data;
-  const Icon = TYPE_ICON[action.action_type] ?? IconInfoCircle;
+  const Icon = isOwnKey(TYPE_ICON, action.action_type) ? TYPE_ICON[action.action_type] : IconInfoCircle;
   const editable = Boolean(action.permissions?.can_edit) && EDITABLE_STATUSES.has(action.status);
   const superseded = action.status === 'superseded';
   // A queued execute/reconcile job has not been picked up while the action is unchanged.
-  const queued = watch !== null && action.updated_at === watch.updatedAt && action.status !== 'executing';
+  const unchanged = watch !== null && action.updated_at === watch.updatedAt && action.status !== 'executing';
+  const queued = unchanged && !watchExpired;
+  // The watch ran out with nothing changed: the job may still be queued, but nobody is polling.
+  const queueStale = unchanged && watchExpired;
 
   const reload = () => {
     setReloading(true);
@@ -322,7 +341,7 @@ export function ActionCard({ actionId, focused = false }: { actionId: string; fo
             <Stack gap={2} style={{ minWidth: 0 }}>
               <Text size="xs" c="dimmed" tt="uppercase" fw={600} lts={0.5}>
                 {actionTypeLabel(action.action_type)} ·{' '}
-                {TARGET_LABELS[action.target_integration] ?? action.target_integration}
+                {lookup(TARGET_LABELS, action.target_integration) ?? action.target_integration}
               </Text>
               <Title order={3} id={`action-${action.id}-title`} style={{ overflowWrap: 'anywhere' }}>
                 {action.title}
@@ -415,9 +434,15 @@ export function ActionCard({ actionId, focused = false }: { actionId: string; fo
           >
             <Text size="sm">
               New payload hash <Code fz="xs">{shortHash(saveNotice.hash)}</Code>.{' '}
-              {saveNotice.invalidated
-                ? `The previous approval by ${saveNotice.invalidated.decided_by_name ?? 'a reviewer'} (v${saveNotice.invalidated.action_version}) was invalidated — this version must be approved again before it can be executed.`
-                : 'Approvals always bind to the saved version, so any earlier approval no longer applies.'}
+              {saveNotice.invalidated ? (
+                <>
+                  The previous approval by <bdi>{saveNotice.invalidated.decided_by_name ?? 'a reviewer'}</bdi>{' '}
+                  (v{saveNotice.invalidated.action_version}) was invalidated — this version must be approved
+                  again before it can be executed.
+                </>
+              ) : (
+                'Approvals always bind to the saved version, so any earlier approval no longer applies.'
+              )}
             </Text>
           </Alert>
         ) : null}
@@ -511,7 +536,11 @@ export function ActionCard({ actionId, focused = false }: { actionId: string; fo
           }}
           onConflict={setConflict}
           queued={queued}
-          onQueued={(updatedAt) => setWatch({ updatedAt, until: Date.now() + WATCH_MS })}
+          queueStale={queueStale}
+          onQueued={(updatedAt) => {
+            setWatchExpired(false);
+            setWatch({ updatedAt, until: Date.now() + WATCH_MS });
+          }}
         />
 
         <Accordion variant="separated" multiple chevronPosition="right">

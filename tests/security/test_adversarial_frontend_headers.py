@@ -156,21 +156,36 @@ def _csp(server: Directive) -> dict[str, list[str]]:
     return policy
 
 
-def _map_lookup(config: list[Directive], variable: str, uri: str) -> str:
-    """Evaluate an nginx ``map $uri $variable`` the way nginx does: exact keys, then regexes in order."""
+def _map_lookup(config: list[Directive], variable: str, uri: str, status: int = 200) -> str:
+    """Evaluate an nginx ``map <source> $variable`` the way nginx does: exact keys, then regexes in order.
+
+    The source may combine ``$uri`` and ``$status`` (e.g. ``"$status:$uri"``); both are substituted for
+    the request being modelled. ``status`` is the response status nginx has decided on when the header
+    filter evaluates ``add_header`` (200 for a served file, 304 for a revalidation, 404 for a miss, …).
+    """
     maps = [d for d in config if d.name == "map" and d.args[1:] == [variable]]
     assert len(maps) == 1, f"map for {variable} not found"
-    assert maps[0].args[0] == "$uri"
     assert maps[0].block is not None
-    entries = [(d.name, d.args[0] if d.args else "") for d in maps[0].block]
+    source_template = maps[0].args[0]
+    assert "$uri" in source_template, f"map for {variable} must be keyed on $uri"
+    values = {"uri": uri, "status": str(status)}
+
+    def substitute(match: re.Match[str]) -> str:
+        assert match.group(1) in values, f"unexpected map source variable ${match.group(1)}"
+        return values[match.group(1)]
+
+    source = re.sub(r"\$([a-z_]+)", substitute, source_template)
+    # Map parameters (not key/value pairs).
+    parameters = {"volatile", "hostnames", "include"}
+    entries = [(d.name, d.args[0] if d.args else "") for d in maps[0].block if d.name not in parameters]
     default = next((value for key, value in entries if key == "default"), "")
     for key, value in entries:
-        if key != "default" and not key.startswith("~") and key == uri:
+        if key != "default" and not key.startswith("~") and key == source:
             return value
     for key, value in entries:
-        if key.startswith("~*") and re.search(key[2:], uri, re.IGNORECASE):
+        if key.startswith("~*") and re.search(key[2:], source, re.IGNORECASE):
             return value
-        if key.startswith("~") and not key.startswith("~*") and re.search(key[1:], uri):
+        if key.startswith("~") and not key.startswith("~*") and re.search(key[1:], source):
             return value
     return default
 
@@ -359,6 +374,66 @@ def test_api_responses_get_no_nginx_cache_control(config: list[Directive]) -> No
     # An empty add_header value is not emitted, so the API's `no-store` is the only Cache-Control.
     assert _map_lookup(config, "$nuvexa_cache_control", "/api/v1/emails/abc") == ""
     assert _map_lookup(config, "$nuvexa_cache_control", "/api/v1/auth/me") == ""
+
+
+# Regression (Prompt 5): error responses under /assets/ must never carry the one-year immutable policy.
+# The Cache-Control header is added with `always` (so errors get a policy too) and the map used to be
+# keyed on $uri alone: a 404 for a hashed asset requested during a rolling deploy (new index.html, old
+# replica) was served "public, max-age=31536000, immutable", so a CDN or browser could pin the miss for
+# a year. The policy must depend on the response status as well.
+@pytest.mark.parametrize("status", [400, 403, 404, 405, 416, 500, 502, 503, 504])
+def test_asset_error_responses_are_not_cacheable(config: list[Directive], status: int) -> None:
+    value = _map_lookup(config, "$nuvexa_cache_control", "/assets/index-wueLltFk.js", status)
+    assert "immutable" not in value
+    assert "public" not in value
+    assert "max-age" not in value
+    assert "no-store" in value, f"{status}: {value!r}"
+
+
+@pytest.mark.parametrize("status", [200, 206, 304])
+def test_asset_success_and_revalidation_keep_the_immutable_policy(config: list[Directive], status: int) -> None:
+    # A 304 updates the cached headers (RFC 9111 §4.3.4): it must repeat the long-lived policy, not
+    # downgrade it. 206 is a byte-range response of the same immutable file.
+    value = _map_lookup(config, "$nuvexa_cache_control", "/assets/index-wueLltFk.js", status)
+    assert value == "public, max-age=31536000, immutable"
+
+
+@pytest.mark.parametrize("status", [200, 304, 404, 502])
+def test_api_cache_control_is_left_to_the_api_for_every_status(config: list[Directive], status: int) -> None:
+    assert _map_lookup(config, "$nuvexa_cache_control", "/api/v1/emails/abc", status) == ""
+
+
+def test_favicon_errors_are_not_cached_for_a_day(config: list[Directive]) -> None:
+    assert _map_lookup(config, "$nuvexa_cache_control", "/favicon.svg") == "public, max-age=86400"
+    assert _map_lookup(config, "$nuvexa_cache_control", "/favicon.svg", 304) == "public, max-age=86400"
+    missing = _map_lookup(config, "$nuvexa_cache_control", "/favicon.svg", 404)
+    assert "max-age" not in missing
+    assert "no-cache" in missing or "no-store" in missing
+
+
+@pytest.mark.parametrize("status", [200, 304, 404, 500])
+def test_spa_shell_is_revalidated_for_every_status(config: list[Directive], status: int) -> None:
+    for uri in ("/index.html", "/", "/.env"):
+        value = _map_lookup(config, "$nuvexa_cache_control", uri, status)
+        assert value in {"no-cache", "no-store"}, f"{status} {uri}: {value!r}"
+
+
+def test_cache_policy_map_is_volatile_so_a_late_status_change_is_seen(config: list[Directive]) -> None:
+    # nginx caches a map variable per request. The range filter turns a 200 into a 416 (unsatisfiable
+    # Range) *after* the headers filter evaluated the map, and the 416 then passes the headers filter
+    # again: without `volatile` it re-used the cached 200 value and a 416 for a hashed asset was sent
+    # "public, max-age=31536000, immutable" (observed with nginx 1.30 in the container image).
+    maps = [d for d in config if d.name == "map" and d.args[1:] == ["$nuvexa_cache_control"]]
+    assert len(maps) == 1
+    assert maps[0].block is not None
+    assert [d.args for d in maps[0].block if d.name == "volatile"] == [[]]
+
+
+def test_cache_control_header_is_still_added_to_error_responses(server: Directive) -> None:
+    # `always` stays: without it nginx would send no Cache-Control at all on a 404, and the
+    # response could be cached heuristically. The map, not the absence of the header, decides.
+    header = _server_headers(server)["cache-control"]
+    assert header.args == ["Cache-Control", "$nuvexa_cache_control", "always"]
 
 
 def test_api_proxy_does_not_compress_dynamic_responses(server: Directive) -> None:

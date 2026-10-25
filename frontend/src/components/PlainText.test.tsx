@@ -12,14 +12,15 @@ afterEach(() => {
 });
 
 describe('<PlainText>', () => {
-  it('renders a pre-wrap block (div) by default and a span when inline', () => {
+  it('renders a pre-wrap block (div) by default and a bidi isolate (bdi) when inline', () => {
     const { container, unmount } = renderWithProviders(<PlainText>Body</PlainText>);
     const block = container.querySelector('.nuvexa-plain-text')!;
     expect(block.tagName).toBe('DIV');
     expect(block).toHaveTextContent('Body');
     unmount();
     const inline = renderWithProviders(<PlainText inline>Comment</PlainText>);
-    expect(inline.container.querySelector('.nuvexa-plain-text')!.tagName).toBe('SPAN');
+    // Inline untrusted text sits inside trusted sentences: <bdi> keeps a U+202E from reordering them.
+    expect(inline.container.querySelector('.nuvexa-plain-text')!.tagName).toBe('BDI');
   });
 
   it.each([null, undefined, ''])('renders an empty element for %j', (value) => {

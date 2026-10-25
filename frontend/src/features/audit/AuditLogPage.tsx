@@ -13,10 +13,9 @@ import {
   TextInput,
   VisuallyHidden,
 } from '@mantine/core';
-import { useDebouncedValue } from '@mantine/hooks';
 import { IconChevronDown, IconChevronRight, IconFilterOff, IconHistory } from '@tabler/icons-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 
 import { auditApi } from '../../api/endpoints';
@@ -31,6 +30,7 @@ import { StatusBadge } from '../../components/StatusBadge';
 import { TablePagination } from '../../components/TablePagination';
 import { TimeText } from '../../components/TimeText';
 import { formatDateTime, humanize, shortId } from '../../lib/format';
+import { useUrlTextFilter } from '../../lib/useUrlTextFilter';
 import { AUDIT_OUTCOME } from '../../theme/status';
 import { useHasPermission } from '../auth/session';
 
@@ -136,8 +136,8 @@ function AuditRow({ event }: { event: AuditEventOut }) {
 export function AuditLogPage() {
   const [params, setParams] = useSearchParams();
   const tenantWide = useHasPermission('audit:read_all');
-  const [eventType, setEventType] = useState(params.get('event_type') ?? '');
-  const [debouncedEventType] = useDebouncedValue(eventType.trim(), 350);
+  // The event-type box follows ?event_type= (Back/Forward, links) and pushes its debounced value into it.
+  const [eventType, setEventType] = useUrlTextFilter('event_type');
   const outcomeParam = params.get('outcome');
   const outcome = (AUDIT_OUTCOMES as readonly string[]).includes(outcomeParam ?? '')
     ? (outcomeParam as AuditOutcome)
@@ -145,25 +145,6 @@ export function AuditLogPage() {
   const resourceType = params.get('resource_type') ?? undefined;
   const offset = Math.max(0, Number(params.get('offset') ?? 0) || 0);
   const currentEventType = params.get('event_type') ?? '';
-
-  // Only a *new* debounced value is pushed into the URL; comparing against the URL alone would
-  // re-apply the stale value when the URL changes first (e.g. "Clear filters").
-  const pushedEventType = useRef(debouncedEventType);
-  useEffect(() => {
-    if (debouncedEventType === pushedEventType.current) return;
-    pushedEventType.current = debouncedEventType;
-    if (debouncedEventType === currentEventType) return;
-    setParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        if (debouncedEventType) next.set('event_type', debouncedEventType);
-        else next.delete('event_type');
-        next.delete('offset');
-        return next;
-      },
-      { replace: true },
-    );
-  }, [debouncedEventType, currentEventType, setParams]);
 
   const query = {
     event_type: currentEventType || undefined,

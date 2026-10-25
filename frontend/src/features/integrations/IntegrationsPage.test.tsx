@@ -18,6 +18,7 @@ import {
   jsonResponse,
   mockFetch,
   renderWithProviders,
+  textContent,
   type Route,
 } from '../../test/utils';
 import { IntegrationsPage } from './IntegrationsPage';
@@ -145,10 +146,10 @@ describe('<IntegrationsPage> Microsoft 365', () => {
     expect(ms.getByText('Connections (1)')).toBeInTheDocument();
 
     const demo = within(cardOf('Demo mailbox'));
-    expect(demo.getByText('demo@contoso.example · Demo mailbox')).toBeInTheDocument();
+    expect(demo.getByText(textContent('demo@contoso.example · Demo mailbox'))).toBeInTheDocument();
     expect(demo.getByLabelText('Status: Active')).toBeInTheDocument();
     expect(demo.getByLabelText('Status: Synced')).toBeInTheDocument();
-    expect(demo.getByText('Inbox · 42 ingested')).toBeInTheDocument();
+    expect(demo.getByText(textContent('Inbox · 42 ingested'))).toBeInTheDocument();
     expect(demo.getByRole('button', { name: 'Sync now' })).toBeEnabled();
     // The demo mailbox cannot be disconnected.
     expect(demo.queryByRole('button', { name: 'Disconnect' })).toBeNull();
@@ -212,7 +213,7 @@ describe('<IntegrationsPage> Microsoft 365', () => {
     expect(graph.getByLabelText('Status: Needs re-authentication')).toBeInTheDocument();
     expect(graph.getByLabelText('Status: Sync failed')).toBeInTheDocument();
     expect(graph.getByText('Graph throttled the request')).toBeInTheDocument();
-    expect(graph.getByText('Inbox · 1,284 ingested')).toBeInTheDocument();
+    expect(graph.getByText(textContent('Inbox · 1,284 ingested'))).toBeInTheDocument();
     expect(graph.getByRole('button', { name: 'Sync now' })).toBeDisabled();
     expect(graph.getByRole('button', { name: 'Disconnect' })).toBeEnabled();
 
@@ -372,6 +373,168 @@ describe('<IntegrationsPage> Azure DevOps', () => {
     expect(ado.getByText('Organization').nextSibling).toHaveTextContent('—');
     expect(ado.getByText('Configured').nextSibling).toHaveTextContent('No');
     expect(ado.queryByText(/Mock mode/)).toBeNull();
+  });
+
+  // Regression (Prompt 5): the delegated Azure DevOps connection is shown and can be disconnected from the UI.
+  describe('delegated connection (entra_delegated)', () => {
+    const adoConnection = (overrides: Partial<ConnectionOut> = {}) =>
+      connection({
+        id: 'conn-ado',
+        provider: 'azure_devops',
+        email: 'dana@contoso.example',
+        display_name: 'Dana (Azure DevOps)',
+        granted_scopes: ['499b84ac-1321-427f-aa17-267ca6975798/user_impersonation'],
+        connected_at: '2026-10-20T08:00:00Z',
+        sync: null,
+        ...overrides,
+      });
+    const delegated = (conn: ConnectionOut | null) => {
+      const base = integrationsOut();
+      return integrationsOut({
+        azure_devops: {
+          ...base.azure_devops,
+          mode: 'entra_delegated',
+          requires_user_connection: true,
+          user_connected: conn !== null,
+          connection: conn,
+        },
+      });
+    };
+
+    it('shows the connection (status, account, connected date) and disconnects it after confirmation, with CSRF, then refetches', async () => {
+      const user = userEvent.setup();
+      document.cookie = 'nuvexa_csrf=csrf-ado; path=/';
+      let current: ConnectionOut | null = adoConnection();
+      const { calls } = setup({
+        integrations: () => delegated(current),
+        extra: [
+          {
+            method: 'DELETE',
+            path: '/api/v1/integrations/connections/conn-ado',
+            handler: () => {
+              current = null;
+              return new Response(null, { status: 204 });
+            },
+          },
+        ],
+      });
+      const ado = within(await screen.findByRole('region', { name: 'Azure DevOps' }));
+      const account = ado.getByText('Dana (Azure DevOps)');
+      const row = account.closest('.mantine-Card-root') as HTMLElement;
+      expect(within(row).getByText('dana@contoso.example')).toBeInTheDocument();
+      expect(within(row).getByLabelText('Status: Active')).toBeInTheDocument();
+      expect(
+        (within(row).getByText('Connected').nextSibling as Element | null)?.querySelector('time'),
+      ).toHaveAttribute('datetime', '2026-10-20T08:00:00Z');
+      expect(ado.getByRole('link', { name: 'Reconnect Azure DevOps' })).toBeInTheDocument();
+
+      await user.click(within(row).getByRole('button', { name: 'Disconnect Azure DevOps' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Disconnect Azure DevOps?' });
+      expect(dialog).toHaveTextContent('deletes your stored (encrypted) Azure DevOps tokens');
+      expect(callsTo(calls, 'DELETE', '/api/v1/integrations/connections/conn-ado')).toHaveLength(0);
+      await user.click(within(dialog).getByRole('button', { name: 'Disconnect' }));
+
+      expect(await screen.findByText('Disconnected')).toBeInTheDocument();
+      const del = callsTo(calls, 'DELETE', '/api/v1/integrations/connections/conn-ado');
+      expect(del).toHaveLength(1);
+      expect(del[0]!.headers.get('X-CSRF-Token')).toBe('csrf-ado');
+      expect(await ado.findByRole('link', { name: 'Connect Azure DevOps' })).toBeInTheDocument();
+      expect(ado.queryByText('Dana (Azure DevOps)')).toBeNull();
+      expect(ado.queryByRole('button', { name: 'Disconnect Azure DevOps' })).toBeNull();
+      expect(callsTo(calls, 'GET', INTEGRATIONS)).toHaveLength(2);
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    });
+
+    it.each([
+      ['not connected', 'Connect Azure DevOps', null],
+      ['connected', 'Reconnect Azure DevOps', adoConnection()],
+    ] as const)(
+      'without action:execute (viewer, %s) there is no %s link; an existing connection can still be revoked',
+      async (_state, linkName, conn) => {
+        setup({ session: PERSONAS.viewer, integrations: () => delegated(conn) });
+        const ado = within(await screen.findByRole('region', { name: 'Azure DevOps' }));
+        // The API answers 403 to a viewer's connect request: the UI does not offer it.
+        expect(ado.queryByRole('link', { name: linkName })).toBeNull();
+        expect(ado.queryByRole('link', { name: /Azure DevOps/ })).toBeNull();
+        // Revoking one's own stored tokens needs no permission beyond ownership (checked server-side).
+        if (conn) expect(ado.getByRole('button', { name: 'Disconnect Azure DevOps' })).toBeEnabled();
+        else expect(ado.queryByRole('button', { name: /Disconnect/ })).toBeNull();
+      },
+    );
+
+    it('with action:execute (member) the Connect Azure DevOps link is offered', async () => {
+      setup({ session: PERSONAS.member, integrations: () => delegated(null) });
+      const ado = within(await screen.findByRole('region', { name: 'Azure DevOps' }));
+      expect(ado.getByRole('link', { name: 'Connect Azure DevOps' })).toHaveAttribute(
+        'href',
+        `/api/v1/integrations/azure-devops/connect?redirect_to=${encodeURIComponent('/integrations')}`,
+      );
+    });
+
+    it('connection: null shows no connection and no Disconnect button', async () => {
+      setup({ integrations: () => delegated(null) });
+      const ado = within(await screen.findByRole('region', { name: 'Azure DevOps' }));
+      expect(ado.getByText('Per-user connection').nextSibling).toHaveTextContent('Not connected');
+      expect(ado.getByRole('link', { name: 'Connect Azure DevOps' })).toBeInTheDocument();
+      expect(ado.queryByRole('button', { name: /Disconnect/ })).toBeNull();
+      expect(ado.queryByText('Dana (Azure DevOps)')).toBeNull();
+    });
+
+    it('shows a connection that needs re-authentication with its error, and can back out or fail safely', async () => {
+      const user = userEvent.setup();
+      const { calls } = setup({
+        integrations: () =>
+          delegated(
+            adoConnection({
+              status: 'needs_reauth',
+              display_name: null,
+              last_error: 'Refresh token expired',
+            }),
+          ),
+        extra: [
+          {
+            method: 'DELETE',
+            path: '/api/v1/integrations/connections/conn-ado',
+            handler: () =>
+              errorResponse(500, 'internal_error', {
+                message: 'Vault unavailable',
+                correlationId: 'corr-ado',
+              }),
+          },
+        ],
+      });
+      const ado = within(await screen.findByRole('region', { name: 'Azure DevOps' }));
+      // No display name: the account falls back to the email address.
+      expect(ado.getAllByText('dana@contoso.example').length).toBeGreaterThan(0);
+      expect(ado.getByLabelText('Status: Needs re-authentication')).toBeInTheDocument();
+      expect(ado.getByText('Refresh token expired')).toBeInTheDocument();
+
+      await user.click(ado.getByRole('button', { name: 'Disconnect Azure DevOps' }));
+      let dialog = await screen.findByRole('dialog', { name: 'Disconnect Azure DevOps?' });
+      await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(callsTo(calls, 'DELETE', '/api/v1/integrations/connections/conn-ado')).toHaveLength(0);
+
+      await user.click(ado.getByRole('button', { name: 'Disconnect Azure DevOps' }));
+      dialog = await screen.findByRole('dialog', { name: 'Disconnect Azure DevOps?' });
+      await user.click(within(dialog).getByRole('button', { name: 'Disconnect' }));
+      expect(await screen.findByText('Could not disconnect')).toBeInTheDocument();
+      expect(screen.getByText('internal_error · ref corr-ado')).toBeInTheDocument();
+      // Still shown: nothing changes until the server confirms.
+      expect(ado.getByRole('button', { name: 'Disconnect Azure DevOps' })).toBeInTheDocument();
+    });
+
+    it('renders hostile account fields as inert text; no accessibility violations', async () => {
+      const hostile = '<img src=x onerror=alert(1)>';
+      const { container } = setup({
+        integrations: () =>
+          delegated(adoConnection({ display_name: hostile, email: `${hostile}@x.example` })),
+      });
+      const ado = within(await screen.findByRole('region', { name: 'Azure DevOps' }));
+      expect(ado.getByText(hostile)).toBeInTheDocument();
+      expect(container.querySelector('img')).toBeNull();
+      await expectNoSeriousA11yViolations(container);
+    });
   });
 
   it('tests the connection and shows the result', async () => {

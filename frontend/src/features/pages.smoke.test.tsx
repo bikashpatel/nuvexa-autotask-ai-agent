@@ -183,6 +183,7 @@ const integrations: IntegrationsOut = {
     configured: true,
     requires_user_connection: false,
     user_connected: false,
+    connection: null,
     default_project: 'Payments',
     default_work_item_type: 'Task',
     api_version: '7.1',

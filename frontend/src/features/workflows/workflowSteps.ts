@@ -1,4 +1,5 @@
 import type { WorkflowEventOut, WorkflowRunOut, WorkflowStatus } from '../../api/types';
+import { lookup } from '../../lib/lookup';
 
 /** The happy path shown by the stepper. */
 export const WORKFLOW_STEPS: { status: WorkflowStatus; label: string; description: string }[] = [
@@ -47,11 +48,10 @@ export interface StepperState {
 }
 
 function failureIndex(run: WorkflowRunOut, events: WorkflowEventOut[]): number {
-  const fromStep = run.current_step ? NODE_TO_INDEX[run.current_step] : undefined;
+  const fromStep = lookup(NODE_TO_INDEX, run.current_step);
   if (fromStep !== undefined) return fromStep;
   const failed = [...events].reverse().find((e) => e.event_type === 'step_failed');
-  if (failed && NODE_TO_INDEX[failed.step] !== undefined) return NODE_TO_INDEX[failed.step]!;
-  return 0;
+  return lookup(NODE_TO_INDEX, failed?.step) ?? 0;
 }
 
 export function computeStepperState(run: WorkflowRunOut, events: WorkflowEventOut[] = []): StepperState {
@@ -77,7 +77,7 @@ export function computeStepperState(run: WorkflowRunOut, events: WorkflowEventOu
     case 'rejected':
       return { active: 6, loadingIndex: null, stoppedIndex: 6, terminal: 'rejected' };
     case 'cancelled': {
-      const index = run.current_step ? (NODE_TO_INDEX[run.current_step] ?? 6) : 6;
+      const index = lookup(NODE_TO_INDEX, run.current_step) ?? 6;
       return { active: index, loadingIndex: null, stoppedIndex: index, terminal: 'cancelled' };
     }
     case 'failed': {

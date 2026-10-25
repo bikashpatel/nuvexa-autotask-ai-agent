@@ -143,7 +143,10 @@ docker run --rm -p 8080:8080 -e API_UPSTREAM=http://host.docker.internal:8000 nu
   `X-Forwarded-Host/-Proto/-For`, `X-Real-IP`, and `X-Request-ID` (passed through, or nginx's
   `$request_id`). Body limit 2 MiB (above the API's 1 MiB, so the API returns its JSON 413).
 - SPA fallback to `index.html`; `/assets/*` (content-hashed) are `public, max-age=31536000,
-immutable`; `index.html` and routes are `no-cache`; `/healthz` for probes; dotfiles are denied.
+immutable` for 200/206/304 only — any error under `/assets/` (e.g. a 404 for a hash from another build
+  during a rolling deploy) is `no-store`, so no CDN pins the miss; the cache map is keyed on
+  `$status:$uri` and `volatile`. `index.html` and routes are `no-cache`; `/healthz` for probes; dotfiles
+  are denied.
 - Security headers on every response: strict CSP, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: same-origin`, `X-Frame-Options: DENY` + `frame-ancestors 'none'`,
   `Permissions-Policy`, COOP/CORP. Duplicate API headers are hidden. HSTS belongs on the TLS

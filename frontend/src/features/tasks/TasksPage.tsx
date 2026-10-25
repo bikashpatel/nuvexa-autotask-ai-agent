@@ -24,6 +24,7 @@ import {
   IconMailOff,
 } from '@tabler/icons-react';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Fragment } from 'react';
 import { useSearchParams } from 'react-router';
 import { Link } from 'react-router';
 
@@ -225,7 +226,18 @@ function DraftCard({ draft }: { draft: ReplyDraftOut }) {
               {draft.subject}
             </Title>
             <Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>
-              To {draft.to_recipients.join(', ') || '—'} · <TimeText value={draft.created_at} size="xs" />
+              To{' '}
+              {draft.to_recipients.length > 0
+                ? draft.to_recipients.map((recipient, index) => (
+                    // Each recipient is bidi-isolated: a U+202E in one cannot reorder the next one or
+                    // the trusted text after the list.
+                    <Fragment key={`${index}:${recipient}`}>
+                      {index > 0 ? ', ' : null}
+                      <bdi>{recipient}</bdi>
+                    </Fragment>
+                  ))
+                : '—'}{' '}
+              · <TimeText value={draft.created_at} size="xs" />
             </Text>
           </Stack>
           <Group gap="xs">

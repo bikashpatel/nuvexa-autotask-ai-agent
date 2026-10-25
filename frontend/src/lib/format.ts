@@ -4,6 +4,7 @@ import relativeTime from 'dayjs/plugin/relativeTime';
 import utc from 'dayjs/plugin/utc';
 
 import type { ActionType, EmailCategory, Priority, TargetIntegration, Urgency } from '../api/types';
+import { lookup } from './lookup';
 
 dayjs.extend(relativeTime);
 dayjs.extend(localizedFormat);
@@ -147,17 +148,17 @@ export const ADO_PRIORITY_LABELS: Record<number, string> = {
 
 export function categoryLabel(value: string | null | undefined): string {
   if (!value) return '—';
-  return CATEGORY_LABELS[value as EmailCategory] ?? humanize(value);
+  return lookup(CATEGORY_LABELS, value) ?? humanize(value);
 }
 
 export function priorityLabel(value: string | null | undefined): string {
   if (!value) return '—';
-  return PRIORITY_LABELS[value as Priority] ?? humanize(value);
+  return lookup(PRIORITY_LABELS, value) ?? humanize(value);
 }
 
 export function actionTypeLabel(value: string | null | undefined): string {
   if (!value) return '—';
-  return ACTION_TYPE_LABELS[value as ActionType] ?? humanize(value);
+  return lookup(ACTION_TYPE_LABELS, value) ?? humanize(value);
 }
 
 export function personLabel(name: string | null | undefined, address: string | null | undefined): string {

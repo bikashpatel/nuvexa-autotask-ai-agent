@@ -95,7 +95,7 @@ export function ActivityFeed({ events }: { events: AuditEventOut[] }) {
             }
           >
             <Text size="xs" c="dimmed">
-              {event.actor_name ?? humanize(event.actor_type)} · {humanize(event.resource_type)} ·{' '}
+              <bdi>{event.actor_name ?? humanize(event.actor_type)}</bdi> · {humanize(event.resource_type)} ·{' '}
               <TimeText value={event.created_at} size="xs" />
             </Text>
           </Timeline.Item>

@@ -1,7 +1,7 @@
 import { MantineProvider } from '@mantine/core';
 import { Notifications } from '@mantine/notifications';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, type RenderResult } from '@testing-library/react';
+import { render, type MatcherFunction, type RenderResult } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { RouterProvider, createMemoryRouter, type RouteObject } from 'react-router';
 import { vi } from 'vitest';
@@ -9,6 +9,19 @@ import { vi } from 'vitest';
 import type { MeOut } from '../api/types';
 import { SessionContext } from '../features/auth/session';
 import { theme } from '../theme/theme';
+
+/**
+ * Text matcher on an element's *full* text content, including child elements such as the <bdi>
+ * isolates around untrusted values. Only the innermost matching element matches, so getBy* stays
+ * unambiguous (the default matcher only sees an element's own text nodes).
+ */
+export function textContent(expected: string | RegExp): MatcherFunction {
+  const matches = (text: string) => (typeof expected === 'string' ? text === expected : expected.test(text));
+  return (_content, element) =>
+    element !== null &&
+    matches(element.textContent ?? '') &&
+    !Array.from(element.children).some((child) => matches(child.textContent ?? ''));
+}
 
 export const TEST_SESSION: MeOut = {
   user: {

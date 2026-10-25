@@ -3,6 +3,7 @@ import { IconInfoCircle } from '@tabler/icons-react';
 
 import type { ConfidenceBucket } from '../api/types';
 import { confidenceTooltip } from '../lib/confidence';
+import { lookup } from '../lib/lookup';
 
 const BUCKET_COLOR: Record<ConfidenceBucket, string> = { high: 'teal', medium: 'yellow', low: 'red' };
 const BUCKET_LABEL: Record<ConfidenceBucket, string> = {
@@ -23,8 +24,8 @@ export function ConfidenceIndicator({
   compact?: boolean;
 }) {
   const clamped = Math.max(0, Math.min(1, Number.isFinite(score) ? score : 0));
-  const color = BUCKET_COLOR[bucket] ?? 'gray';
-  const label = BUCKET_LABEL[bucket] ?? bucket;
+  const color = lookup(BUCKET_COLOR, bucket) ?? 'gray';
+  const label = lookup(BUCKET_LABEL, bucket) ?? bucket;
   const tooltip = confidenceTooltip(method);
 
   if (compact) {

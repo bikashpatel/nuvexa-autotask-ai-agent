@@ -3,6 +3,7 @@ import { useDisclosure } from '@mantine/hooks';
 import {
   IconBan,
   IconCheck,
+  IconClockPause,
   IconDeviceFloppy,
   IconPlayerPlay,
   IconRefreshDot,
@@ -48,6 +49,12 @@ export interface ActionControlsProps {
   onConflict: (error: ApiError) => void;
   /** Execute/reconcile job queued and not yet picked up (disables re-submission). */
   queued: boolean;
+  /**
+   * The 120 s watch on a queued job expired with no visible change: polling has stopped, so the
+   * card says so instead of promising live updates. Buttons follow the permissions again (the server
+   * stays the authority; a repeated execute is absorbed by its idempotency checks).
+   */
+  queueStale?: boolean;
   /** Execute/reconcile were queued: keep polling until the server state changes. */
   onQueued: (updatedAt: string) => void;
 }
@@ -80,6 +87,7 @@ export function ActionControls({
   onDiscard,
   onConflict,
   queued,
+  queueStale = false,
   onQueued,
 }: ActionControlsProps) {
   const permissions = action.permissions ?? NO_PERMISSIONS;
@@ -349,6 +357,14 @@ export function ActionControls({
             Queued — waiting for a worker to pick up the job. Status updates automatically.
           </Text>
         </Group>
+      ) : queueStale ? (
+        <Group gap={6} mt={6} role="status" wrap="nowrap">
+          <IconClockPause size={14} aria-hidden />
+          <Text size="xs" c="dimmed">
+            Still queued — no worker has picked up the job yet and this page has stopped checking. Reload to
+            check the latest status.
+          </Text>
+        </Group>
       ) : null}
       {showApprove && blockedReason ? (
         <Text size="xs" c="dimmed" mt={6}>
@@ -364,8 +380,8 @@ export function ActionControls({
       >
         <Stack gap="md">
           <Text size="sm">
-            You are approving <b>{actionTypeLabel(action.action_type)}</b> “{action.title}”. The approval is
-            bound to this version and payload hash — any later edit invalidates it.
+            You are approving <b>{actionTypeLabel(action.action_type)}</b> “<bdi>{action.title}</bdi>”. The
+            approval is bound to this version and payload hash — any later edit invalidates it.
           </Text>
           <HashLine action={action} />
           <Textarea

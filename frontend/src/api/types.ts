@@ -235,6 +235,8 @@ export interface AzureDevOpsIntegrationOut {
   configured: boolean;
   requires_user_connection: boolean;
   user_connected: boolean;
+  /** The caller's own delegated (entra_delegated) connection; null when not connected. */
+  connection: ConnectionOut | null;
   default_project: string | null;
   default_work_item_type: string;
   api_version: string;
