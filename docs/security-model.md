@@ -106,7 +106,9 @@ LLM output crosses the boundary only after Pydantic validation **and** policy va
 * Request body limit (`MAX_REQUEST_BYTES`, default 1 MiB): `413` for declared and streamed bodies;
   pagination offsets are bounded; NUL characters in bodies, query strings and paths are rejected
   (`422`) because PostgreSQL cannot store them. Graph fields are cleaned and clipped to their columns on
-  ingestion; a message the database still rejects is skipped and recorded, never blocking the mailbox.
+  ingestion; a message the database still rejects is skipped and recorded, never blocking the mailbox. A
+  sync round is bounded by messages, pages, time (`MAIL_SYNC_ROUND_SECONDS`) and body bytes
+  (`MAIL_SYNC_MAX_BODY_BYTES`) and resumes from the pending page.
 * In-process rate limiting on auth, sync, analyze, approve and execute routes. **Limitation:** limits
   are per replica; for multi-replica deployments configure a shared limit at the ingress / API
   gateway.

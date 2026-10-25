@@ -4,6 +4,8 @@
   round, then `@odata.nextLink` pages until `@odata.deltaLink`.
 * `Prefer: IdType="ImmutableId"` (stable ids), `outlook.body-content-type="text"`, `odata.maxpagesize`.
 * Only next/delta links on the configured Graph origin are followed (SSRF guard).
+* A round stops after the current page once it reaches `max_messages`, 500 pages,
+  `MAIL_SYNC_ROUND_SECONDS` or `MAIL_SYNC_MAX_BODY_BYTES`, and resumes from the pending nextLink.
 * Attachment content is never requested; only `hasAttachments` is read.
 """
 
@@ -11,7 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
@@ -52,7 +55,9 @@ class GraphMailboxProvider:
         sleep: SleepFn = asyncio.sleep,
         *,
         retry_policy: RetryPolicy | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock
         self._token_provider = token_provider
         self._settings = settings
         self._http_client = http_client
@@ -84,6 +89,7 @@ class GraphMailboxProvider:
             changes: dict[str, NormalizedEmail | None] = {}
             pages = 0
             skipped = 0
+            started = self._clock()
             async with self._client() as client:
                 while True:
                     response = await request_idempotent(
@@ -114,7 +120,12 @@ class GraphMailboxProvider:
                             retryable=True,
                         )
                     url = self._response_link(next_link)
-                    if len(changes) >= max_messages or pages >= _MAX_PAGES_PER_CALL:
+                    if (
+                        len(changes) >= max_messages
+                        or pages >= _MAX_PAGES_PER_CALL
+                        or self._clock() - started >= self._settings.mail_sync_round_seconds
+                        or _body_bytes(changes) >= self._settings.mail_sync_max_body_bytes
+                    ):
                         # Resume from the pending page next time; nothing on it has been consumed.
                         result = self._result(changes, next_link, truncated=True)
                         break
@@ -274,3 +285,7 @@ class GraphMailboxProvider:
             delta_link=link,
             truncated=truncated,
         )
+
+
+def _body_bytes(changes: dict[str, NormalizedEmail | None]) -> int:
+    return sum(len(email.body_text.encode("utf-8")) for email in changes.values() if email is not None)

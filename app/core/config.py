@@ -125,6 +125,9 @@ class Settings(BaseSettings):
     graph_timeout_seconds: float = Field(default=30.0, gt=0)
     mail_sync_initial_days: int = Field(default=14, ge=1, le=365)
     mail_sync_max_messages: int = Field(default=200, ge=1, le=5000)
+    # Per-round budgets: a round that reaches one stops after the current page and resumes there next time.
+    mail_sync_round_seconds: float = Field(default=120.0, gt=0)
+    mail_sync_max_body_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)
     mail_poll_interval_seconds: int = Field(default=0, ge=0)  # 0 = manual sync only
 
     # --- Azure DevOps ------------------------------------------------------------------------
