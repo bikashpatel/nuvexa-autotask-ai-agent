@@ -213,16 +213,24 @@ async def dump_api(persona: Persona, paths: list[str]) -> str:
 
 
 async def dump_checkpoints(h: Harness) -> str:
-    """LangGraph checkpoints and pending writes (InMemorySaver, or the production AsyncSqliteSaver tables)."""
+    """LangGraph checkpoints and pending writes: InMemorySaver, or the production AsyncSqliteSaver /
+    AsyncPostgresSaver tables (the PostgreSQL saver holds a connection pool and splits out blobs)."""
     saver = h.engine.graph.checkpointer
     conn = getattr(saver, "conn", None)
-    if conn is not None:  # AsyncSqliteSaver from app.workflows.checkpointer.open_checkpointer
-        parts = []
-        for table in ("checkpoints", "writes"):
+    if conn is None:
+        return repr(getattr(saver, "storage", None)) + repr(getattr(saver, "writes", None))
+    parts: list[str] = []
+    if hasattr(conn, "connection"):  # psycopg AsyncConnectionPool (AsyncPostgresSaver)
+        async with conn.connection() as pg:
+            for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+                cursor = await pg.execute(f"SELECT * FROM {table}")
+                parts.extend(f"{table}: {tuple(row)!r}" for row in await cursor.fetchall())
+    else:
+        for table in ("checkpoints", "writes"):  # aiosqlite connection (AsyncSqliteSaver)
             async with conn.execute(f"SELECT * FROM {table}") as cursor:
                 parts.extend(f"{table}: {tuple(row)!r}" for row in await cursor.fetchall())
-        return "\n".join(parts)
-    return repr(getattr(saver, "storage", None)) + repr(getattr(saver, "writes", None))
+    assert parts, "no checkpoint rows were captured; a leak sweep over empty tables would prove nothing"
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------------------------------
