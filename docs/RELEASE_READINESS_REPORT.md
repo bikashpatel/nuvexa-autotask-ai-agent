@@ -121,6 +121,9 @@ Uncertainty: 19 mutants crash the test process even on Linux and are not counted
 |---|---|---|
 | [40166551446](https://github.com/bikashpatel/nuvexa-autotask-ai-agent/actions/runs/40166551446) | `ee6503f` | **Blocked by the secret scan** — this report quoted a secret-shaped synthetic fixture (§5); cancelled when the fix was pushed |
 | [40167197528](https://github.com/bikashpatel/nuvexa-autotask-ai-agent/actions/runs/40167197528) | `2a66558` | **All gates green**, `CI gate` passed. PostgreSQL layers: unit 3,217 (1 skipped, 5 strict xfail), integration 310, security 445 (2 skipped), evaluation 44; coverage gate passed (8,141 statements / 13 missed, 1,730 branches / 17 partial); SQLite suite, frontend, dependency audit, secret scan, SAST, container and configuration scans all passed |
+| [40175578202](https://github.com/bikashpatel/nuvexa-autotask-ai-agent/actions/runs/40175578202) | `2e2296d` | **All gates green** (R-1, R-4, IaC, OTel sanitizing, realip, merge-aware secret scan: gitleaks 58 commits, merges included) |
+| [40179197606](https://github.com/bikashpatel/nuvexa-autotask-ai-agent/actions/runs/40179197606) | `339a1da` | **Cancelled** during the PostgreSQL integration layer by the E2E dispatch below (same concurrency group; dispatched too early). Every job that finished passed; superseded by the next run on the same commit |
+| [40179780886](https://github.com/bikashpatel/nuvexa-autotask-ai-agent/actions/runs/40179780886) | `339a1da` (final tree) | **All gates green, with the opt-in system E2E** (41 passed on the runner). PostgreSQL layers: unit 3,352 (1 skipped, 5 strict xfail), integration 317, security 569 (2 skipped), evaluation 44; coverage gate passed (8,440 statements / 15 missed, 1,786 branches / 16 partial); SQLite 4,232 passed, 53 skipped, 99.71 %; frontend, dependency audit, secret scan (63 commits), SAST, container and configuration scans passed |
 
 ## 3. Coverage
 
