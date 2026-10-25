@@ -77,28 +77,35 @@ tokens) and Playwright Chromium UI flows.
 
 ### 2.3 Mutation testing
 
-`uv run --with mutmut mutmut run --max-children 8` on the security-critical modules (`state_machine`, `authz`,
-`approval_service`, `execution_service`, `action_policy`, `id_token`), 17 minutes, macOS:
+`mutmut run --max-children 8` on the security-critical modules (`state_machine`, `authz`, `approval_service`,
+`execution_service`, `action_policy`, `id_token`). A first run on macOS reported 164 "segfault" mutants (the
+forked test process crashed); the authoritative run is the one in a Linux container (the backend's
+`python:3.14-slim-trixie` base image, commit `933273e`, 52 minutes):
 
 | Result | Mutants |
 |---|---|
-| Killed | 2,334 → **2,336** after two follow-up assertions (below) |
-| Survived | 168 → 166 |
-| Inconclusive ("segfault": the forked test process crashed) | 164 — 102 in `execution_service`, 31 each in `approval_service` and `action_policy`; mostly mutants of locking/transaction arguments (e.g. `for_update`). Not counted as detected |
+| Killed | 2,338 → **2,342** after four follow-up assertions (`4ad56ea`, `b015c48`) |
+| Survived | 309 → **305** |
+| Inconclusive (process crashed) | 19 |
 | No test | 1 |
-| **Score** | **93.3 %** of conclusive mutants (2,336 / 2,503); 87.6 % if every inconclusive mutant is counted as undetected (previous release review: 87.8 %) |
+| **Score** | **88.4 %** of conclusive mutants (2,342 / 2,648); 87.8 % counting the 19 crashes as undetected (previous release review: 87.8 %) |
 
-`state_machine` and `authz`: no survivors. Triage of survivors (sampled diffs):
+The macOS "93.3 %" figure published earlier in this report was too optimistic: most mutants that crashed on
+macOS survive on Linux. `state_machine` and `authz` have no survivors. Triage of the survivors (sampled diffs):
 
 * `id_token` (80): error-message wording only (`IdTokenError(None)`, changed case) — accepted; tests assert error
   types and categories, not text.
-* Services (86): database-lock mutants (`for_update` flipped; only observable on PostgreSQL, covered by the
-  PostgreSQL concurrency tests), equivalent mutants and unreachable defaults, message wording, and a few
-  audit-detail fields that no test asserts (`resource_id` on some reject/supersede/repair events) — low.
-* Two real gaps, now closed with assertions (`8e010c5`): reconciliation building the Azure DevOps client without
-  the acting user (their delegated token), and the crashed attempt losing its `ambiguous` category.
+* `execution_service` (136, mostly `_dispatch` and `execute`), `approval_service` (42), `action_policy` (51):
+  log event names and fields, span attribute names, latency arithmetic, error-message wording, clipping bounds
+  off by one (`[:500]` → `[:501]`), equivalent defaults, and database-lock mutants (`for_update` flipped; only
+  observable on PostgreSQL and covered by `tests/integration/test_postgres_concurrency.py`). None of the sampled
+  survivors changes what is authorized or written.
+* Real gaps found and closed with assertions: reconciliation building the Azure DevOps client without the
+  acting user, the crashed attempt losing its `ambiguous` category (`8e010c5`), the audit targets of
+  rejection denials, superseded actions and status repairs (`4ad56ea`), and the tenant of the
+  `payload_integrity_failure` audit event.
 
-Uncertainty: the inconclusive mutants should be re-classified on Linux (fork behaviour differs on macOS).
+Uncertainty: 19 mutants crash the test process even on Linux and are not counted as detected.
 
 ### 2.4 CI (GitHub Actions)
 

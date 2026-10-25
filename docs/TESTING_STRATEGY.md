@@ -151,7 +151,7 @@ Scanner and CI-gate results: docs/CI_SECURITY_GATES.md §8.
 | CI, Prompt 2 commit `dad3218` (run 40144764111) | PostgreSQL job: 3,038 passed, 2 skipped, 5 xfailed; coverage 99.61 %; all jobs green |
 | CI with the release gates, `aaef287` (runs 40148542307 and 40149198842) | every gate green; PostgreSQL layers 2,663 / 308 / 138 / 44 passed; SQLite 3,143 passed (99.57 %); frontend 1,167; system E2E on the runner 37 passed |
 | Frontend (release review) | 1,329 tests; 99.93 % statements, 98.62 % branches, 100 % functions and lines |
-| Mutation testing, release review | 2,667 mutants: 2,336 killed, 166 survived, 164 inconclusive (forked process crashed on macOS), 1 untested — **93.3 %** of conclusive mutants (87.6 % counting inconclusive as undetected); triage in docs/RELEASE_READINESS_REPORT.md §2.3 |
+| Mutation testing, release review (Linux) | 2,667 mutants: 2,342 killed, 305 survived, 19 inconclusive (process crashed), 1 untested — **88.4 %** of conclusive mutants (87.8 % counting crashes as undetected); triage in docs/RELEASE_READINESS_REPORT.md §2.3 |
 | Adversarial review (Prompt 5) | 5 independent suites; 49 tests failed on first run (35 defects), all fixed test-first — docs/RELEASE_READINESS_REPORT.md §6 |
 | Mutation testing, first run | 2,492 mutants: 2,077 killed, 414 survived, 1 untested — 83.4 %; `state_machine` and `authz` 100 % |
 | Mutation testing, after hardening | 2,180 killed + 7 timeouts (detected), 304 survived, 1 untested — **87.8 %**. Remaining survivors: message/log wording (accepted), database-lock mutants (PostgreSQL concurrency tests), unreachable defaults |
