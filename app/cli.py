@@ -21,9 +21,15 @@ def _run_migrations() -> None:
     cfg.set_main_option("script_location", str(root / "app" / "db" / "migrations"))
     command.upgrade(cfg, "head")
 
+    from app.db.privileges import grant_runtime_privileges
+    from app.observability.logging import configure_logging
     from app.workflows.checkpointer import setup_checkpointer
 
-    asyncio.run(setup_checkpointer(get_settings()))
+    settings = get_settings()
+    configure_logging(settings.log_level, settings.log_format)  # after Alembic's fileConfig: structured events below
+    # All DDL happens here, as the schema owner. The runtime role's grants come last, once every table exists.
+    asyncio.run(setup_checkpointer(settings))
+    asyncio.run(grant_runtime_privileges(settings))
 
 
 def _serve_api(host: str, port: int, reload: bool = False) -> None:
@@ -43,6 +49,7 @@ def _serve_api(host: str, port: int, reload: bool = False) -> None:
 
 
 async def _worker_main() -> None:
+    from app.db.privileges import check_runtime_privileges
     from app.db.session import Database
     from app.observability.logging import configure_logging
     from app.observability.tracing import configure_tracing
@@ -53,6 +60,7 @@ async def _worker_main() -> None:
     configure_tracing(settings, f"{settings.otel_service_name}-worker")
     db = Database(settings)
     try:
+        await check_runtime_privileges(db.engine, settings, process="worker")
         async with worker_context(db, settings) as worker:
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):

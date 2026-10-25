@@ -54,6 +54,9 @@ async def test_setup_checkpointer_creates_tables(tmp_path: Path) -> None:
     await cp.setup_checkpointer(make_settings(f"sqlite+aiosqlite:///{tmp_path / 'mig.db'}"))
     assert (tmp_path / "mig-checkpoints.db").exists()
     await cp.setup_checkpointer(make_settings(f"sqlite+aiosqlite:///{tmp_path / 'mig.db'}"))  # idempotent
+    with contextlib.closing(sqlite3.connect(tmp_path / "mig-checkpoints.db")) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"checkpoints", "writes"} <= tables
 
 
 class _FakePool:
@@ -101,7 +104,7 @@ async def test_postgres_checkpointer_uses_a_pool_and_closes_it(fake_postgres: ty
         assert isinstance(saver, _FakeSaver)
         (pool,) = fake_postgres.instances
         assert saver.pool is pool
-        assert pool.events == ["open", "setup"]
+        assert pool.events == ["open"]
     assert pool.conninfo == "postgresql://u:p@db:5432/nuvexa"
     assert pool.kwargs["min_size"] == 1
     assert pool.kwargs["max_size"] == 6
@@ -110,6 +113,21 @@ async def test_postgres_checkpointer_uses_a_pool_and_closes_it(fake_postgres: ty
     assert connection_kwargs["autocommit"] is True
     assert connection_kwargs["prepare_threshold"] == 0
     assert connection_kwargs["row_factory"] is dict_row
+    assert pool.events == ["open", "close"]
+
+
+# Regression (R-4): the runtime (api/worker) connects as a role without CREATE on the schema, so the checkpointer it
+# opens must never run LangGraph's setup() (CREATE TABLE IF NOT EXISTS / migrations). Only `nuvexa migrate` does.
+async def test_the_runtime_checkpointer_never_runs_ddl(fake_postgres: type[_FakePool]) -> None:
+    async with cp.open_checkpointer(make_settings("postgresql+psycopg://u:p@db/n")):
+        pass
+    assert "setup" not in fake_postgres.instances[0].events
+
+
+async def test_setup_checkpointer_creates_the_postgres_tables(fake_postgres: type[_FakePool]) -> None:
+    await cp.setup_checkpointer(make_settings("postgresql+psycopg://owner:p@db/n"))
+    (pool,) = fake_postgres.instances
+    assert pool.conninfo == "postgresql://owner:p@db/n"
     assert pool.events == ["open", "setup", "close"]
 
 
@@ -123,7 +141,7 @@ async def test_postgres_pool_is_closed_when_the_body_fails(fake_postgres: type[_
     with pytest.raises(RuntimeError, match="boom"):
         async with cp.open_checkpointer(make_settings("postgresql+psycopg://u:p@db/n")):
             raise RuntimeError("boom")
-    assert fake_postgres.instances[0].events == ["open", "setup", "close"]
+    assert fake_postgres.instances[0].events == ["open", "close"]
 
 
 async def test_postgres_pool_is_closed_when_setup_fails(fake_postgres: type[_FakePool], monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -132,6 +150,5 @@ async def test_postgres_pool_is_closed_when_setup_fails(fake_postgres: type[_Fak
 
     monkeypatch.setattr(_FakeSaver, "setup", failing_setup)
     with pytest.raises(ConnectionError):
-        async with cp.open_checkpointer(make_settings("postgresql+psycopg://u:p@db/n")):
-            pytest.fail("must not yield")
+        await cp.setup_checkpointer(make_settings("postgresql+psycopg://u:p@db/n"))
     assert fake_postgres.instances[0].events == ["open", "close"]

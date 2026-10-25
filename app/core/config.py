@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # PostgreSQL session limits (resource-exhaustion guard); 0 disables.
     database_statement_timeout_ms: int = Field(default=30_000, ge=0)
     database_lock_timeout_ms: int = Field(default=10_000, ge=0)
+    # Least-privilege role that api/worker connect as (app/db/privileges.py). `nuvexa migrate`, connected as the
+    # schema owner, grants it DML-only privileges; at startup in production a different role is reported.
+    # A plain lowercase identifier (it is interpolated, quoted, into GRANT statements). Unset = no grants step.
+    database_runtime_role: str | None = Field(default=None, pattern=r"^[a-z_][a-z0-9_]{0,62}$")
 
     # --- HTTP / session security --------------------------------------------------------------
     session_cookie_name: str = "nuvexa_session"

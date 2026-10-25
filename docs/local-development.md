@@ -35,7 +35,7 @@ Installed by `uv sync` (entry point `app.cli:main`); run it with `uv run nuvexa 
 |---|---|
 | `nuvexa api [--host 0.0.0.0] [--port 8000] [--reload]` | Runs the API (uvicorn, app factory in `app/main.py`); `--reload` for development |
 | `nuvexa worker` | Runs the job worker (mail sync, analysis, execution, retention) |
-| `nuvexa migrate` | `alembic upgrade head` plus LangGraph checkpoint tables |
+| `nuvexa migrate` | `alembic upgrade head`, LangGraph checkpoint tables, then the runtime role's grants when `DATABASE_RUNTIME_ROLE` is set (PostgreSQL); run it as the schema owner |
 | `nuvexa demo [--port 8000]` | Single process: SQLite at `./data/nuvexa-demo.db`, migrations, embedded worker, mock integrations, API on 127.0.0.1 |
 | `nuvexa gen-key` | Prints a new Fernet key for `TOKEN_ENCRYPTION_KEYS` |
 
@@ -70,6 +70,20 @@ The default `DATABASE_URL` (`postgresql+psycopg://nuvexa:nuvexa@localhost:5432/n
 compose database. If port 5432 is already in use, set `NUVEXA_DB_PORT=15432` in `.env` and point
 `DATABASE_URL` (and `TEST_DATABASE_URL`) at that port.
 
+That default is the schema owner, which is convenient on the host. To run like Compose and production
+(owner for migrations, least-privilege runtime role for the processes — see
+[Database roles](security-model.md#database-roles)):
+
+```bash
+DATABASE_RUNTIME_ROLE=nuvexa_app uv run nuvexa migrate      # as the owner: DDL + grants
+# api (terminal 1) and worker (terminal 2) as the runtime role:
+DATABASE_URL=postgresql+psycopg://nuvexa_app:nuvexa_app@localhost:5432/nuvexa uv run nuvexa api
+DATABASE_URL=postgresql+psycopg://nuvexa_app:nuvexa_app@localhost:5432/nuvexa uv run nuvexa worker
+```
+
+The `nuvexa_app` role is created when the volume is first initialised (`infra/postgres/initdb/`) and by
+`docker compose run --rm db-roles` for an older volume.
+
 `nuvexa api` trusts `X-Forwarded-*` headers only from `FORWARDED_ALLOW_IPS` (default `127.0.0.1`,
 which covers the Vite proxy). It is read from the process environment, not from `.env`.
 
@@ -84,6 +98,13 @@ docker compose up --build
 The backend image is built once and used by `migrate`, `api` and `worker`. Rebuild after
 dependency or code changes (`docker compose up --build`). `docker compose logs -f api worker`
 follows the backend logs.
+
+The stack uses two database roles. `migrate` connects as the schema owner (`POSTGRES_USER`) and is the only
+service that runs DDL; `api` and `worker` connect as the runtime role `nuvexa_app`
+(`NUVEXA_DB_RUNTIME_USER` / `NUVEXA_DB_RUNTIME_PASSWORD`, demo defaults `nuvexa_app`), which can read and write
+rows but not change the schema, truncate tables or update the audit trail. The one-shot `db-roles` service
+creates or updates that role on every start (also for volumes created before it existed), and `migrate` then
+grants its privileges. `docker compose logs migrate` shows `database_runtime_grants_applied`.
 
 ## Configuration
 
@@ -119,7 +140,9 @@ TEST_DATABASE_URL=postgresql+psycopg://nuvexa:nuvexa@localhost:5432/nuvexa_test 
 ```
 
 The test fixtures drop and recreate all tables in that database; never point `TEST_DATABASE_URL`
-at a database you care about.
+at a database you care about. `tests/security/test_database_least_privilege.py` also creates and drops
+throwaway login roles (`nuvexa_rt_…`), so the `TEST_DATABASE_URL` user needs `CREATEROLE` (the image's
+bootstrap user, as in Compose and CI, has it).
 
 ### Paid model calls
 

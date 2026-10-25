@@ -20,6 +20,7 @@ from app.api.middleware import (
 )
 from app.api.routes import actions, auth, emails, health, integrations, misc, workflows
 from app.core.config import Settings, get_settings
+from app.db.privileges import check_runtime_privileges
 from app.db.session import Database
 from app.observability.logging import configure_logging, get_logger
 from app.observability.tracing import configure_tracing, instrument_app
@@ -38,6 +39,8 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Production safety net (risk R-4): warns when the database role can change the schema; never refuses.
+        await check_runtime_privileges(db.engine, settings, process="api")
         worker_task: asyncio.Task[None] | None = None
         worker_stop = None
         if settings.run_embedded_worker:

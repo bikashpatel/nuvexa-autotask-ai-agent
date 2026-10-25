@@ -14,6 +14,11 @@
 # Host ports (all bound to 127.0.0.1) are configurable when the defaults are already in use:
 #   NUVEXA_WEB_PORT (8080, dashboard)   NUVEXA_API_PORT (8000, API)   NUVEXA_DB_PORT (5432, Postgres)
 # APP_BASE_URL and OAUTH_REDIRECT_URI default to http://localhost:${NUVEXA_WEB_PORT}.
+#
+# Two database roles (docs/security-model.md, "Database roles"): `migrate` connects as the schema owner
+# (POSTGRES_USER) and is the only process that runs DDL; `api` and `worker` connect as the least-privilege
+# runtime role NUVEXA_DB_RUNTIME_USER (default nuvexa_app / password nuvexa_app), which can only read and
+# write rows. `db-roles` creates that role; `nuvexa migrate` grants its privileges.
 
 name: nuvexa
 
@@ -34,8 +39,11 @@ x-backend: &backend
     LLM_PROVIDER: ${LLM_PROVIDER:-heuristic}
     MAIL_MODE: ${MAIL_MODE:-demo}
     AZURE_DEVOPS_MODE: ${AZURE_DEVOPS_MODE:-mock}
-    # Always the in-network database (a DATABASE_URL in .env that points at localhost is ignored here).
-    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nuvexa}:${POSTGRES_PASSWORD:-nuvexa}@postgres:5432/${POSTGRES_DB:-nuvexa}
+    # Always the in-network database (a DATABASE_URL in .env that points at localhost is ignored here),
+    # as the DML-only runtime role. Only `migrate` overrides it with the schema owner.
+    DATABASE_URL: postgresql+psycopg://${NUVEXA_DB_RUNTIME_USER:-nuvexa_app}:${NUVEXA_DB_RUNTIME_PASSWORD:-nuvexa_app}@postgres:5432/${POSTGRES_DB:-nuvexa}
+    # `nuvexa migrate` grants this role its privileges; api/worker report a different role at startup in production.
+    DATABASE_RUNTIME_ROLE: ${NUVEXA_DB_RUNTIME_USER:-nuvexa_app}
     # The browser reaches everything through the frontend container (nginx proxies /api).
     APP_BASE_URL: ${APP_BASE_URL:-http://localhost:${NUVEXA_WEB_PORT:-8080}}
     OAUTH_REDIRECT_URI: ${OAUTH_REDIRECT_URI:-http://localhost:${NUVEXA_WEB_PORT:-8080}/api/v1/auth/callback}
@@ -53,10 +61,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-nuvexa}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nuvexa}
       POSTGRES_DB: ${POSTGRES_DB:-nuvexa}
+      # Read by infra/postgres/initdb/20-create-runtime-role.sh on first initialisation.
+      NUVEXA_DB_RUNTIME_USER: ${NUVEXA_DB_RUNTIME_USER:-nuvexa_app}
+      NUVEXA_DB_RUNTIME_PASSWORD: ${NUVEXA_DB_RUNTIME_PASSWORD:-nuvexa_app}
     volumes:
       # PostgreSQL 18 images keep PGDATA under /var/lib/postgresql/18/docker; mount the parent.
       - postgres-data:/var/lib/postgresql
-      # Creates nuvexa_test on first initialisation (for TEST_DATABASE_URL runs from the host).
+      # On first initialisation: creates nuvexa_test (for TEST_DATABASE_URL runs from the host) and the
+      # runtime role.
       - ./infra/postgres/initdb:/docker-entrypoint-initdb.d:ro
     ports:
       # Published on loopback only, for host tools and `uv run ...` against this database.
@@ -69,16 +81,41 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # One-shot schema migration (alembic upgrade head). api and worker start only after it succeeds.
+  # One-shot: creates/updates the runtime role (LOGIN only, no privileges yet) on every start, so database
+  # volumes created before the role existed, or a changed NUVEXA_DB_RUNTIME_PASSWORD, converge too.
+  db-roles:
+    image: postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
+    command: ["sh", "/docker-entrypoint-initdb.d/20-create-runtime-role.sh"]
+    environment:
+      PGHOST: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:-nuvexa}
+      POSTGRES_USER: ${POSTGRES_USER:-nuvexa}
+      POSTGRES_DB: ${POSTGRES_DB:-nuvexa}
+      NUVEXA_DB_RUNTIME_USER: ${NUVEXA_DB_RUNTIME_USER:-nuvexa_app}
+      NUVEXA_DB_RUNTIME_PASSWORD: ${NUVEXA_DB_RUNTIME_PASSWORD:-nuvexa_app}
+    volumes:
+      - ./infra/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # One-shot schema migration (alembic upgrade head, LangGraph checkpoint tables, runtime role grants) as the
+  # schema owner — the only service with DDL rights. api and worker start only after it succeeds.
   migrate:
     <<: *backend
     command: ["nuvexa", "migrate"]
+    environment:
+      <<: *backend-env
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nuvexa}:${POSTGRES_PASSWORD:-nuvexa}@postgres:5432/${POSTGRES_DB:-nuvexa}
     restart: "no"
     healthcheck:
       disable: true
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
 
   # FastAPI backend (container port 8000). The browser normally uses it through the frontend proxy;
   # the host port is for curl / OpenAPI docs.

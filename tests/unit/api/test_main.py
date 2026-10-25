@@ -187,6 +187,24 @@ async def test_lifespan_without_worker_only_disposes(
     assert disposed == [True]
 
 
+async def test_lifespan_checks_the_database_privileges_before_serving(
+    settings: Settings, db: Database, no_side_effects: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checks: list[tuple[Any, Settings, str]] = []
+
+    async def check(engine: Any, cfg: Settings, *, process: str) -> list[str]:
+        checks.append((engine, cfg, process))
+        return ["superuser"]  # findings are only logged (warning); the API still starts
+
+    monkeypatch.setattr(main_module, "check_runtime_privileges", check)
+    app = create_app(settings, db)
+    assert checks == []
+    async for client in _client(app):
+        assert checks == [(db.engine, settings, "api")]
+        assert (await client.get(f"{API_PREFIX}/health/live")).status_code == 200
+    assert len(checks) == 1
+
+
 class _FastAsyncio:
     """asyncio proxy for app.main whose wait_for timeouts are capped (startup/shutdown waits of 30 s+)."""
 

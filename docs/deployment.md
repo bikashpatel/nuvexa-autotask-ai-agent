@@ -109,16 +109,75 @@ it is forwarded, and keep `FORWARDED_ALLOW_IPS` on the API restricted to the fro
 
 * Flexible Server, PostgreSQL 18, private access (delegated subnet in the same VNet) or a private
   endpoint; TLS required (`sslmode=require`).
-* Create a dedicated database (`nuvexa`) and an application role that owns it; do not use the server
-  administrator in `DATABASE_URL`.
+* **Two database roles, and never the server administrator in an application URL** (risk R-4,
+  [security model](security-model.md#database-roles)):
+
+| Role | Example name | Used by | Privileges | Key Vault secret → env |
+|---|---|---|---|---|
+| Owner (migration) role | `nuvexa_owner` | `migrate` job only | Owns database `nuvexa` and every object in it; the only role that runs DDL | `database-migrate-url` → `DATABASE_URL` of the job |
+| Runtime role | `nuvexa_app` | `api`, `worker` | `SELECT`/`INSERT`/`UPDATE`/`DELETE` on the application and LangGraph checkpoint tables, `USAGE`/`SELECT` on sequences; no `CREATE`, no ownership, no `TRUNCATE`, no `UPDATE` of `audit_events`; granted by `nuvexa migrate` | `database-url` → `DATABASE_URL` |
+
+**One-time setup per environment** (before the first `migrate` run), as the server administrator in
+`psql` over the private network. Generate both passwords, store them only in Key Vault, and keep
+the runtime role free of any other attribute or membership (no `CREATEROLE`, no `azure_pg_admin`, no
+membership in the owner role):
+
+```sql
+CREATE ROLE nuvexa_owner LOGIN PASSWORD '<owner-password>';
+CREATE ROLE nuvexa_app LOGIN PASSWORD '<runtime-password>';
+-- Hand database "nuvexa" (az postgres flexible-server db create) to the owner role. Since PostgreSQL 16 the
+-- administrator must be able to SET ROLE to the new owner for this; drop that membership afterwards.
+GRANT nuvexa_owner TO <admin-user>;
+ALTER DATABASE nuvexa OWNER TO nuvexa_owner;
+REVOKE nuvexa_owner FROM <admin-user>;
+```
+
+Nothing else is granted by hand: `nuvexa migrate` (next section) grants the runtime role its
+privileges, on every run. To rotate a password: `ALTER ROLE nuvexa_app PASSWORD '<new>'` as the
+administrator, then update the Key Vault secret (`database-url` or `database-migrate-url`).
+
+* `database-url` (runtime): `postgresql+psycopg://nuvexa_app:<url-encoded password>@<server>.postgres.database.azure.com:5432/nuvexa?sslmode=require`;
+  `database-migrate-url` (owner): the same with `nuvexa_owner`. Set `DATABASE_RUNTIME_ROLE=nuvexa_app` in
+  the shared environment variables: the job grants that role, and `api`/`worker` use it for their startup
+  check.
+* **Startup check.** With `APP_ENV=production`, `api` and `worker` inspect their own database role at
+  startup and log `database_role_least_privilege` (INFO) — or a `database_role_overprivileged` WARNING
+  whose `findings` list what is wrong: `superuser`, `createrole`, `owns_schema`, `owns_tables`,
+  `create_in_schema`, `create_in_database`, `truncate_tables`, `update_audit_events`,
+  `not_runtime_role` (connected as another role than `DATABASE_RUNTIME_ROLE`). They still start; alert on
+  the warning. `database_privilege_check_failed` means the check could not run (e.g. database
+  unreachable at startup).
 * Connections: each API/worker process uses a pool of `DATABASE_POOL_SIZE` (default 5) plus the same
-  overflow. Multiply by replicas and keep the total under the server's `max_connections` (small
+  overflow, and the worker's checkpointer pool up to `WORKER_CONCURRENCY` (at least 2). Multiply by
+  replicas, add the migrate job, and keep the total under the server's `max_connections` (small
   Burstable SKUs allow few connections).
 * Enable automated backups/PITR; zone-redundant HA for production.
 
 ## Migrations as a Container Apps job
 
-`nuvexa migrate` runs `alembic upgrade head` and creates/updates the LangGraph checkpoint tables.
+`nuvexa migrate` connects as the **owner** role and, in this order:
+
+1. runs `alembic upgrade head`;
+2. creates/updates the LangGraph checkpoint tables;
+3. grants the runtime role (`DATABASE_RUNTIME_ROLE`) its privileges (`app/db/privileges.py`). The step is
+   idempotent and convergent — it revokes whatever the role holds on the schema's tables and sequences, then
+   grants DML only, revokes `UPDATE` on `audit_events` and writes on the migration bookkeeping tables, and sets
+   `ALTER DEFAULT PRIVILEGES FOR ROLE <owner>` so tables created by later migrations are usable at once. A
+   privilege granted by hand in between is removed again by the next run. The job fails with a clear error if
+   the role does not exist or is the owner role itself, and logs `database_role_overprivileged` if the role
+   still holds more (e.g. membership in the owner role). Without `DATABASE_RUNTIME_ROLE` the step is skipped
+   with a warning.
+
+`api` and `worker` never run DDL (their LangGraph checkpointer does not run its `setup()`), so they work with
+the runtime role only after the job succeeded.
+
+Configure the job with the owner secret instead of `database-url`:
+`--secrets database-migrate-url=keyvaultref:$KVURI/database-migrate-url,identityref:<migrate-identity>` and
+`--env-vars DATABASE_URL=secretref:database-migrate-url DATABASE_RUNTIME_ROLE=nuvexa_app` (plus the other
+shared variables). Only the job may reference `database-migrate-url`: give the job **its own** user-assigned
+managed identity with *Key Vault Secrets User* scoped to that one secret, and scope the apps' identity to
+their secrets (or use a separate vault) — with one identity holding the role on the whole vault, a
+compromised `api` could read the owner credentials from Key Vault and the role split would protect little.
 
 Rollout order for every release:
 

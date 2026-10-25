@@ -37,7 +37,7 @@ from app.db.models import ActionExecution, AuditEvent
 from app.domain.enums import JobStatus, JobType
 from app.integrations.http import RetryPolicy
 from app.observability import tracing
-from app.workflows.checkpointer import open_checkpointer
+from app.workflows.checkpointer import open_checkpointer, setup_checkpointer
 from tests.conftest import make_settings
 from tests.integration.conftest import Harness, HarnessFactory, Persona, approve_and_execute, find_action
 from tests.integration.fakes import FakeEntra, ScriptedAgent
@@ -1224,6 +1224,7 @@ async def test_unexpected_worker_exception_text_is_neither_logged_nor_persisted(
 ) -> None:
     canary = CANARY_PREFIX + pysecrets.token_hex(6)
     crash = RuntimeError(f"SDK crashed; request had Authorization: Bearer {secrets.oauth_access_token}; {canary}")
+    await setup_checkpointer(make_settings(database_url))  # the tables `nuvexa migrate` creates (PostgreSQL)
     async with open_checkpointer(make_settings(database_url)) as production_checkpointer:  # strict serializer
         h = await make_harness(
             agent=ScriptedAgent({"classify": [crash]}),
