@@ -26,11 +26,18 @@ DDL_PROBES = [
     "TRUNCATE jobs",
     "TRUNCATE audit_events",
     "UPDATE audit_events SET event_type = 'forged'",
+    "DELETE FROM audit_events",
     "ALTER TABLE audit_events DISABLE TRIGGER ALL",
     "DROP TRIGGER audit_events_append_only ON audit_events",
     "SET session_replication_role = replica",
     "DROP TABLE checkpoints",
 ]
+# The one sanctioned delete of audit events: the SECURITY DEFINER retention function, which the runtime role may
+# call and which refuses a retention below the 30-day minimum whoever calls it (22023 invalid_parameter_value).
+PURGE_PROBES = {
+    "SELECT nuvexa_purge_audit_events('00000000-0000-0000-0000-000000000000', 30)": "allowed",
+    "SELECT nuvexa_purge_audit_events('00000000-0000-0000-0000-000000000000', 29)": "22023",
+}
 
 # Runs inside the API container with the API's own configuration (DATABASE_URL from its environment).
 PROBE = f"""
@@ -45,7 +52,7 @@ async def main():
     results = {{}}
     async with engine.connect() as conn:
         results["current_user"] = (await conn.execute(text("SELECT current_user"))).scalar_one()
-    for statement in {DDL_PROBES!r}:
+    for statement in {[*DDL_PROBES, *PURGE_PROBES]!r}:
         async with engine.connect() as conn:
             try:
                 await conn.execute(text(statement))
@@ -80,7 +87,8 @@ def test_api_and_worker_connect_as_the_runtime_role() -> None:
 def test_the_api_credentials_cannot_change_the_schema_or_the_audit_trail() -> None:
     results = json.loads(compose("exec", "-T", "api", "python", "-c", PROBE).stdout.strip().splitlines()[-1])
     assert results.pop("current_user") == RUNTIME_ROLE
-    assert results == dict.fromkeys(DDL_PROBES, "42501")  # insufficient_privilege, every one of them
+    # insufficient_privilege for every one of them; the purge function is the only way to delete audit events
+    assert results == {**dict.fromkeys(DDL_PROBES, "42501"), **PURGE_PROBES}
 
 
 def test_the_runtime_role_holds_dml_privileges_only() -> None:
@@ -100,7 +108,13 @@ def test_the_runtime_role_holds_dml_privileges_only() -> None:
         "select string_agg(p, ',' order by p) from unnest(array['SELECT','INSERT','UPDATE','DELETE','TRUNCATE']) p "
         f"where has_table_privilege('{role}', 'audit_events', p)"
     )
-    assert audit == "DELETE,INSERT,SELECT"
+    assert audit == "INSERT,SELECT"  # retention deletes only through nuvexa_purge_audit_events
+    purge = psql(
+        f"select p.prosecdef, has_function_privilege('{role}', p.oid, 'EXECUTE'), p.proacl is null or exists ("
+        "select 1 from aclexplode(p.proacl) a where a.grantee = 0 and a.privilege_type = 'EXECUTE') "
+        "from pg_proc p where p.oid = 'nuvexa_purge_audit_events(uuid, integer)'::regprocedure"
+    )
+    assert purge == "t|t|f"  # security definer; the runtime role may execute it, PUBLIC may not
     tables = psql(
         "select string_agg(tablename, ',' order by tablename) from pg_tables where schemaname = 'public' and not ("
         f"has_table_privilege('{role}', schemaname || '.' || tablename, 'SELECT')"
