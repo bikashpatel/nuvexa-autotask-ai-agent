@@ -36,7 +36,12 @@ def _sqlite_checkpoint_path(database_url: str) -> str:
 
 
 @asynccontextmanager
-async def open_checkpointer(settings: Settings) -> AsyncIterator[BaseCheckpointSaver[str]]:
+async def open_checkpointer(settings: Settings, *, setup: bool = False) -> AsyncIterator[BaseCheckpointSaver[str]]:
+    """The checkpointer for a worker. `setup=True` creates/migrates its tables (DDL): only `nuvexa migrate` passes it.
+
+    api/worker connect as a runtime role without CREATE on the schema (app/db/privileges.py), so they must never run
+    LangGraph's setup(): even its CREATE TABLE IF NOT EXISTS needs CREATE privilege.
+    """
     if settings.is_postgres:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
         from psycopg.rows import dict_row
@@ -59,7 +64,8 @@ async def open_checkpointer(settings: Settings) -> AsyncIterator[BaseCheckpointS
         await pool.open()
         try:
             saver = AsyncPostgresSaver(pool, serde=checkpoint_serializer())  # type: ignore[arg-type]
-            await saver.setup()
+            if setup:
+                await saver.setup()
             yield saver
         finally:
             await pool.close()
@@ -69,13 +75,14 @@ async def open_checkpointer(settings: Settings) -> AsyncIterator[BaseCheckpointS
 
         async with aiosqlite.connect(_sqlite_checkpoint_path(settings.database_url)) as conn:
             sqlite_saver = AsyncSqliteSaver(conn, serde=checkpoint_serializer())
-            await sqlite_saver.setup()
+            if setup:  # (the SQLite saver also creates its tables lazily; SQLite has no roles)
+                await sqlite_saver.setup()
             yield sqlite_saver
     else:  # pragma: no cover - unsupported URL schemes fail elsewhere first
         yield InMemorySaver(serde=checkpoint_serializer())
 
 
 async def setup_checkpointer(settings: Settings) -> None:
-    """Create/upgrade checkpoint tables (run by `nuvexa migrate`)."""
-    async with open_checkpointer(settings):
+    """Create/upgrade checkpoint tables (run by `nuvexa migrate`, connected as the schema owner)."""
+    async with open_checkpointer(settings, setup=True):
         pass

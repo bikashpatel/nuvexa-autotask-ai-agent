@@ -123,19 +123,23 @@ def test_gen_key_prints_a_valid_fernet_key(capsys: pytest.CaptureFixture[str]) -
     assert capsys.readouterr().out.strip() != key
 
 
-def test_migrate_runs_alembic_and_checkpointer_setup(
+def test_migrate_runs_alembic_checkpointer_setup_and_runtime_grants(
     monkeypatch: pytest.MonkeyPatch, captured_run: list[str], settings: Settings
 ) -> None:
     upgrades: list[tuple[Any, str]] = []
+    logging_configured: list[tuple[str, str]] = []
     monkeypatch.setattr("alembic.command.upgrade", lambda cfg, rev: upgrades.append((cfg, rev)))
+    monkeypatch.setattr("app.observability.logging.configure_logging", lambda *a: logging_configured.append(a))
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
     cli.main(["migrate"])
+    assert logging_configured == [(settings.log_level, settings.log_format)]  # grant events are structured logs
     ((cfg, revision),) = upgrades
     assert revision == "head"
     assert Path(cfg.config_file_name) == REPO / "alembic.ini"
     assert Path(cfg.get_main_option("script_location")) == REPO / "app" / "db" / "migrations"
     assert (REPO / "app" / "db" / "migrations" / "env.py").exists()
-    assert captured_run == ["setup_checkpointer"]
+    # All DDL happens here, as the schema owner; the runtime role's grants follow once every table exists.
+    assert captured_run == ["setup_checkpointer", "grant_runtime_privileges"]
 
 
 def test_demo_sets_defaults_and_serves_on_loopback(isolated_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -217,6 +221,34 @@ async def test_worker_main_wires_signals_and_disposes(settings: Settings, monkey
         ("context", settings),
         "dispose",
     ]
+
+
+async def test_worker_main_checks_its_database_privileges_before_starting(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[Any] = []
+
+    async def check(engine: Any, cfg: Settings, *, process: str) -> list[str]:
+        events.append(("check", engine, cfg, process))
+        return []
+
+    @contextlib.asynccontextmanager
+    async def fake_context(db: Any, cfg: Settings) -> AsyncIterator[_FakeWorker]:
+        events.append(("context", db.engine))
+        yield _FakeWorker()
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr("app.db.privileges.check_runtime_privileges", check)
+    monkeypatch.setattr("app.workers.runner.worker_context", fake_context)
+    monkeypatch.setattr("app.observability.logging.configure_logging", lambda *a: None)
+    monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", lambda *a: None)
+
+    await cli._worker_main()
+
+    assert [event[0] for event in events] == ["check", "context"]
+    (_, engine, cfg, process), (_, context_engine) = events
+    assert (cfg, process) == (settings, "worker")
+    assert engine is context_engine
 
 
 async def test_worker_main_disposes_on_failure(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:

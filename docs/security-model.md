@@ -171,9 +171,44 @@ Interrupted or unrecorded writes converge instead of sticking:
 | Azure DevOps (`entra_delegated` mode) | `499b84ac-1321-427f-aa17-267ca6975798/user_impersonation` | Work items created as the approving user |
 | Azure DevOps (`pat` mode) | PAT scope `vso.work_write` (Work Items: Read & write); optionally `vso.project` (Project and Team: Read) for project listing / *Test connection* | Service identity; use an organization-scoped PAT |
 
+### Database roles
+
+PostgreSQL deployments use two roles (risk R-4), so a compromised API or worker process cannot alter or
+drop the schema, disable the audit triggers or rewrite the audit trail:
+
+| Role | Connects | Privileges |
+|---|---|---|
+| Owner (migration) role — `POSTGRES_USER` locally, `nuvexa_owner` in Azure | `nuvexa migrate` only | Owns the schema objects; runs Alembic, LangGraph's checkpoint `setup()` and the grants step |
+| Runtime role `nuvexa_app` (`DATABASE_RUNTIME_ROLE`) | `nuvexa api`, `nuvexa worker` | `CONNECT`, `USAGE` on the schema; `SELECT`, `INSERT`, `UPDATE`, `DELETE` on the application and LangGraph checkpoint tables; `USAGE`, `SELECT` on sequences. `audit_events`: `SELECT`, `INSERT`, `DELETE` only. `alembic_version`, `checkpoint_migrations`: `SELECT` only |
+
+* **Grants are code, applied on every migration.** `nuvexa migrate` (`app/db/privileges.py`) revokes everything
+  the runtime role holds on the schema's tables and sequences and grants exactly the set above, plus
+  `ALTER DEFAULT PRIVILEGES FOR ROLE <owner>` so tables from later migrations are covered. Manual drift is
+  undone by the next run. The role itself (LOGIN, password) is created once by an operator
+  (`infra/postgres/initdb/` locally, [deployment guide](deployment.md#database) in Azure), because that needs
+  `CREATEROLE`, which the owner role should not have.
+* **The runtime never runs DDL.** The LangGraph checkpointer that `api`/`worker` open does not run `setup()`
+  (whose `CREATE TABLE IF NOT EXISTS` already needs `CREATE` on the schema); only `nuvexa migrate` does.
+* **What PostgreSQL refuses to the runtime role** (`tests/security/test_database_least_privilege.py`, and against
+  the Compose stack in `e2e/test_database_roles_system.py`): `CREATE`/`ALTER`/`DROP` of tables, indexes, views,
+  schemas and functions (including replacing the audit trigger function), `TRUNCATE` of any table, `UPDATE` of
+  `audit_events`, disabling or dropping triggers, `SET session_replication_role`, taking ownership, changing
+  role attributes and writing the migration bookkeeping tables — each with `insufficient_privilege` from the
+  privilege system, before any trigger runs.
+* **Defence in depth for the audit trail.** `DELETE` on `audit_events` stays for the retention purge; the
+  append-only trigger still refuses it unless the transaction sets `nuvexa.audit_purge`.
+* **Production safety net.** With `APP_ENV=production`, `api` and `worker` check their own role at startup and
+  log a `database_role_overprivileged` WARNING with `findings` (`superuser`, `createrole`, `owns_schema`,
+  `owns_tables`, `create_in_schema`, `create_in_database`, `truncate_tables`, `update_audit_events`,
+  `not_runtime_role`). They do not refuse to start; alert on the event.
+
 ## Residual risks / roadmap
 
 * In-process rate limiting (see above).
+* The runtime database role keeps `DELETE` on `audit_events` for the retention purge and can set the purge flag
+  itself, so a fully compromised API/worker could still delete audit rows (detected neither by the HMAC nor by
+  the trigger — see R-3). Moving the purge into a `SECURITY DEFINER` function owned by the owner role that only
+  deletes rows older than the retention window, and revoking `DELETE` from the runtime role, would close this.
 * Webhook (Graph change notifications) ingestion is designed but not enabled; polling/manual sync is used.
 * Attachment content is never downloaded in the MVP (metadata only).
 * LLM classification can still be wrong; humans approve every action.
