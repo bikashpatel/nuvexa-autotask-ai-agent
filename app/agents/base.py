@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel
 
 from app.core.errors import AppError
+from app.domain.enums import FailureCategory
 from app.schemas.ai import ClassificationOutput, ExtractionOutput, PlannedToolCall, PlanningContext
 from app.schemas.email import EmailContext
 from app.schemas.settings import TaxonomyConfig
@@ -41,23 +42,40 @@ class PlanningResult(BaseModel):
 
 
 class AgentError(AppError):
+    """A model call failed. `category` becomes the run's `error_category` (e.g. rejected credentials are an
+    authorization problem, an unknown model or deployment a configuration problem, not bad model output)."""
+
     status_code = 502
     code = "agent_error"
     public_message = "The analysis model failed."
     retryable = False
+    category: FailureCategory = FailureCategory.LLM_PROVIDER
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        category: FailureCategory | None = None,
+        details: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(message, details=details)
+        if category is not None:
+            self.category = category
 
 
 class AgentProviderError(AgentError):
-    """Network/rate-limit/5xx from the model provider (retryable at the job level)."""
+    """Network/rate-limit/5xx or an unprocessable response from the model provider (retryable at the job level)."""
 
     code = "agent_provider_error"
     retryable = True
+    category = FailureCategory.LLM_PROVIDER
 
 
 class AgentOutputError(AgentError):
     """Refusal, truncated or schema-invalid output (not retried automatically)."""
 
     code = "agent_output_error"
+    category = FailureCategory.LLM_OUTPUT
 
 
 class EmailAnalysisAgent(Protocol):

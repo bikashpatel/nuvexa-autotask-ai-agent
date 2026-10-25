@@ -21,8 +21,9 @@ from langgraph.types import interrupt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.base import AgentError, AgentProviderError, EmailAnalysisAgent, LLMUsage
+from app.agents.base import AgentError, EmailAnalysisAgent, LLMUsage
 from app.agents.sanitize import build_email_context
+from app.agents.tools import MAX_TOOL_CALLS, OVERFLOW_TOOL_NAME
 from app.agents.validation import validate_analysis
 from app.core.config import Settings
 from app.core.errors import AppError, NotFound
@@ -121,16 +122,98 @@ def _accumulate(run: WorkflowRun, usage: LLMUsage) -> None:
     run.metrics = m
 
 
+_TIMELINE_TEXT_CHARS = 120
+_TIMELINE_LIST_ITEMS = 10
+_TIMELINE_ITEM_CHARS = 64
+_TIMELINE_ARGUMENT_KEYS = 20
+# One "proposed"/"rejected" event per tool call the agent may make, plus one summary of anything beyond that.
+MAX_TOOL_CALL_EVENTS = MAX_TOOL_CALLS + 1
+
+
+def _timeline_value(value: Any, limit: int = _TIMELINE_TEXT_CHARS) -> Any:
+    if isinstance(value, str):
+        return value[:limit]
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    return f"({type(value).__name__})"  # nested structures are not copied into the timeline
+
+
 def _sanitized_tool_args(args: dict[str, Any]) -> dict[str, Any]:
-    """Tool arguments for the timeline: short structural fields only (no free text from the email)."""
+    """Tool arguments for the timeline: short structural fields only (no free text from the email), bounded."""
     keep = ("title", "work_item_type", "priority", "tags", "subject", "due_date")
     out: dict[str, Any] = {}
     for key in keep:
-        if key in args:
-            value = args[key]
-            out[key] = value[:120] if isinstance(value, str) else value
-    out["argument_keys"] = sorted(args)
+        if key not in args:
+            continue
+        value = args[key]
+        if isinstance(value, list):
+            out[key] = [_timeline_value(v, _TIMELINE_ITEM_CHARS) for v in value[:_TIMELINE_LIST_ITEMS]]
+            if len(value) > _TIMELINE_LIST_ITEMS:
+                out[f"{key}_omitted"] = len(value) - _TIMELINE_LIST_ITEMS
+        else:
+            out[key] = _timeline_value(value)
+    out["argument_keys"] = [str(k)[:_TIMELINE_ITEM_CHARS] for k in sorted(args)[:_TIMELINE_ARGUMENT_KEYS]]
     return out
+
+
+@dataclass(frozen=True)
+class _StepFailure:
+    """How a failed analysis step is recorded, and what the node raises afterwards."""
+
+    category: FailureCategory
+    message: str  # stored on the run and in the timeline: an AppError's message, else the exception type only
+    retryable: bool
+    error: Exception
+    error_type: str
+
+
+class SanitizedStepError(Exception):
+    """Base of the stand-ins for unexpected exceptions whose own type cannot carry a fixed message."""
+
+
+_STAND_IN_TYPES: dict[type[BaseException], type[SanitizedStepError]] = {}
+
+
+def _stand_in_type(original: type[BaseException]) -> type[SanitizedStepError]:
+    # Named like the original, so the worker records the same type name (e.g. "OperationalError"); defined here,
+    # so a rendered traceback shows `app.workflows.graph.OperationalError`, not the library's class. One class per
+    # original type (bounded by the exception classes in the code base).
+    stand_in = _STAND_IN_TYPES.get(original)
+    if stand_in is None:
+        name = original.__name__
+        stand_in = _STAND_IN_TYPES.setdefault(
+            original, type(name, (SanitizedStepError,), {"__qualname__": original.__qualname__})
+        )
+    return stand_in
+
+
+def _sanitized_error(exc: Exception, step: str) -> Exception:
+    """An exception of the same type as `exc` (or a stand-in with the same name) that carries only a fixed message.
+
+    LangGraph stores `repr()` of the exception leaving a node in the checkpoint's error write, and the worker logs it
+    with its traceback; the text of an unexpected exception can hold provider responses, tokens, SQL parameters or
+    email content. The copy keeps the original's frames (the log still shows where it failed) but neither its text
+    nor its chained causes.
+    """
+    message = f"Analysis step '{step}' failed ({type(exc).__name__}); the original error text is not recorded."
+    try:
+        clean: Exception = type(exc)(message)
+    except Exception:  # e.g. SQLAlchemy errors need the statement, parameters and driver error
+        clean = _stand_in_type(type(exc))(message)
+    if type(clean) is not type(exc) or clean.args != (message,):
+        clean = _stand_in_type(type(exc))(message)
+    clean.__cause__ = None
+    clean.__suppress_context__ = True  # nothing implicitly chained later is rendered either
+    return clean.with_traceback(exc.__traceback__)
+
+
+def _step_failure(exc: Exception, step: str) -> _StepFailure:
+    error_type = type(exc).__name__
+    if isinstance(exc, AgentError):
+        return _StepFailure(exc.category, exc.message, exc.retryable, exc, error_type)
+    if isinstance(exc, AppError):  # messages of application errors are written for users
+        return _StepFailure(FailureCategory.INTERNAL, exc.message, False, exc, error_type)
+    return _StepFailure(FailureCategory.INTERNAL, error_type, False, _sanitized_error(exc, step), error_type)
 
 
 async def _thread_duplicate_warnings(session: AsyncSession, email: EmailMessage) -> list[str]:
@@ -181,21 +264,13 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
             raise NotFound("Email not found.")
         return run, email
 
-    async def fail(run_id: str, step: str, exc: Exception) -> None:
-        category = (
-            FailureCategory.LLM_PROVIDER
-            if isinstance(exc, AgentProviderError)
-            else FailureCategory.LLM_OUTPUT
-            if isinstance(exc, AgentError)
-            else FailureCategory.INTERNAL
-        )
-        message = exc.message if isinstance(exc, AppError) else type(exc).__name__
+    async def fail(run_id: str, step: str, failure: _StepFailure) -> None:
         async with sf() as s:
             run, email = await load(s, run_id, for_update=True)
             if run.status not in _TERMINAL_REVIEW:
                 set_run_status(run, W.FAILED, step)
-            run.error_category = category
-            run.error_message = message[:2000]
+            run.error_category = failure.category
+            run.error_message = failure.message[:2000]
             email.analysis_status = EmailAnalysisStatus.FAILED
             record_workflow_event(
                 s,
@@ -204,8 +279,8 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
                 step=step,
                 event_type=WorkflowEventType.STEP_FAILED,
                 status="failure",
-                message=message[:500],
-                details={"failure_category": category.value, "retryable": isinstance(exc, AgentProviderError)},
+                message=failure.message[:500],
+                details={"failure_category": failure.category.value, "retryable": failure.retryable},
             )
             await s.commit()
 
@@ -213,14 +288,18 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
         async def node(state: WorkflowState) -> dict[str, Any]:
             started = time.perf_counter()
             with start_span(f"nuvexa.workflow.{name}", {"nuvexa.workflow_run_id": state["run_id"]}):
+                failure: _StepFailure | None = None
                 try:
                     update = await fn(state)
                 except _Halt:
                     return {"halt": True}
                 except Exception as exc:
-                    log.warning("workflow_step_failed", step=name, run_id=state["run_id"], error=type(exc).__name__)
-                    await fail(state["run_id"], name, exc)
-                    raise
+                    failure = _step_failure(exc, name)
+                if failure is not None:
+                    # Outside the handler: if recording fails, the raw exception is not chained to that error either.
+                    log.warning("workflow_step_failed", step=name, run_id=state["run_id"], error=failure.error_type)
+                    await fail(state["run_id"], name, failure)
+                    raise failure.error
             log.info(
                 "workflow_step_completed",
                 step=name,
@@ -483,7 +562,13 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
                 message=f"Planner proposed {len(result.tool_calls)} action(s).",
                 details={"usage": _usage_details(result.usage)},
             )
-            for call in result.tool_calls:
+            # At most MAX_TOOL_CALL_EVENTS timeline events however many calls an agent returns; the rest collapse
+            # into one summary event.
+            budget = MAX_TOOL_CALL_EVENTS - 1
+            total = len(result.tool_calls) + len(result.rejected_calls)
+            if total <= MAX_TOOL_CALL_EVENTS:
+                budget = total
+            for call in result.tool_calls[:budget]:
                 record_workflow_event(
                     s,
                     tenant_id=run.tenant_id,
@@ -494,7 +579,7 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
                     message=f"Tool '{call.tool_name}' called (proposal only — nothing executed).",
                     details={"tool": call.tool_name, "arguments": _sanitized_tool_args(call.arguments)},
                 )
-            for rejected in result.rejected_calls:
+            for rejected in result.rejected_calls[: max(0, budget - len(result.tool_calls))]:
                 record_workflow_event(
                     s,
                     tenant_id=run.tenant_id,
@@ -503,7 +588,22 @@ def build_graph(deps: WorkflowDeps) -> StateGraph[WorkflowState]:
                     event_type=WorkflowEventType.TOOL_CALL,
                     status="rejected",
                     message="Tool call rejected by schema validation.",
-                    details=dict(rejected),
+                    details={str(k)[:40]: str(v)[:300] for k, v in list(rejected.items())[:4]},
+                )
+            if total > budget:
+                record_workflow_event(
+                    s,
+                    tenant_id=run.tenant_id,
+                    workflow_run_id=run.id,
+                    step="plan",
+                    event_type=WorkflowEventType.TOOL_CALL,
+                    status="rejected",
+                    message=f"{total - budget} further tool call(s) not recorded individually.",
+                    details={
+                        "tool_name": OVERFLOW_TOOL_NAME,
+                        "reason": "too many tool calls",
+                        "omitted": total - budget,
+                    },
                 )
 
             specs = ActionPolicy(ts, settings).build_proposals(email, validated, result.tool_calls)

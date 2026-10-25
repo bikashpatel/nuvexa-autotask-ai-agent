@@ -14,12 +14,14 @@ from app.core.context import set_correlation_id
 from app.observability.logging import (
     _MAX_STRING,
     _SAFE_KEYS,
+    NOISY_LOGGERS,
     REDACTED,
     _add_correlation_id,
     _is_sensitive_key,
     _redact_processor,
     configure_logging,
     get_logger,
+    redact_text,
     redact_value,
 )
 
@@ -218,6 +220,64 @@ def test_configure_logging_console(capsys: pytest.CaptureFixture[str], restore_l
     assert "visible_warning_event" in out
     assert "pw" not in out.replace("password", "")
     assert not _json_lines(out)
+
+
+# --- Prompt 5: more credential shapes, tracebacks rendered before redaction, quiet HTTP client loggers --------
+
+PAT52 = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"  # 52 base32 characters, synthetic
+PAT84 = "A1" * 38 + "AZDO" + "WXYZ"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Authorization: Basic OnBhdDEyMzQ1Njc4OTA=", f"Authorization: Basic {REDACTED}"),
+        ("basic   dXNlcjpwYXNzd29yZA==", f"Basic {REDACTED}"),
+        ("Basic authentication failed", "Basic authentication failed"),  # prose: no digit, "+", "/" or "="
+        ("key sk-proj-AbCdEfGhIjKlMnOpQrSt here", f"key {REDACTED} here"),
+        ("sk-short", "sk-short"),
+        (f"pat {PAT52}.", f"pat {REDACTED}."),
+        (f"token={PAT84}", f"token={REDACTED}"),
+        ("password=hunter2hunter2&next=1", f"password={REDACTED}&next=1"),
+        ('{"client_secret": "abcd1234"}', f'{{"client_secret": "{REDACTED}"}}'),
+        ("api-key: 0123456789abcdef", f"api-key: {REDACTED}"),
+        ("PAT=abcd1234; other", f"PAT={REDACTED}; other"),
+        ("access_token: [REDACTED]", "access_token: [REDACTED]"),  # already redacted: left alone
+        ("refresh_token=abc", "refresh_token=abc"),  # values shorter than 4 characters are not secrets
+    ],
+)
+def test_redact_text_scrubs_credential_shapes(raw: str, expected: str) -> None:
+    assert redact_text(raw) == expected
+    assert redact_value(raw) == expected
+
+
+def test_rendered_exception_is_redacted_but_not_shortened_like_values() -> None:
+    text = "Traceback ...\n" + "x" * (_MAX_STRING * 3) + "\nRuntimeError: Bearer abc123"
+    out = _redact_processor(None, "error", {"event": "e", "exception": text})["exception"]
+    assert out.endswith(f"RuntimeError: Bearer {REDACTED}")
+    assert len(out) > _MAX_STRING
+    assert _redact_processor(None, "error", {"event": "e", "exception": {"token": "t"}})["exception"] == {
+        "token": REDACTED
+    }
+
+
+def test_exc_info_is_rendered_before_redaction(capsys: pytest.CaptureFixture[str], restore_logging: None) -> None:
+    configure_logging("INFO", "json")
+    try:
+        raise RuntimeError(f"call failed: Authorization: Bearer leaked-value {JWT}")
+    except RuntimeError:
+        get_logger("unit.test").exception("boom")
+    [line] = [line for line in _json_lines(capsys.readouterr().out) if line["event"] == "boom"]
+    assert "RuntimeError" in str(line["exception"])
+    assert "leaked-value" not in str(line["exception"])
+    assert JWT not in str(line["exception"])
+
+
+def test_http_client_loggers_are_quiet(restore_logging: None) -> None:
+    configure_logging("DEBUG", "json")
+    assert {"httpx2", "httpcore2", "httpx", "httpcore", "openai"} <= set(NOISY_LOGGERS)
+    for name in NOISY_LOGGERS:
+        assert logging.getLogger(name).level == logging.WARNING
 
 
 def test_get_logger_returns_bound_logger() -> None:

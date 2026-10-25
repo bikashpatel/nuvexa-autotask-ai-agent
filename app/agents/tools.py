@@ -17,6 +17,7 @@ from app.schemas.ai import PLANNING_TOOLS, PlannedToolCall, PlanningContext
 ToolRegistry = dict[str, tuple[ActionType, type[BaseModel]]]
 
 MAX_TOOL_CALLS = 6
+OVERFLOW_TOOL_NAME = "(overflow)"  # rejection record summarizing the calls beyond MAX_TOOL_CALLS
 _NAME_SAFE_RE = re.compile(r"[^A-Za-z0-9_\-]")
 _KNOWN_TOOL_NAMES = frozenset(get_args(PlannedToolCall.model_fields["tool_name"].annotation))
 
@@ -85,14 +86,15 @@ def validate_tool_call(name: str, arguments: object, offered: ToolRegistry) -> P
 def collect_tool_calls(
     calls: list[tuple[str, object]], offered: ToolRegistry, *, completed: set[ActionType] | None = None
 ) -> tuple[list[PlannedToolCall], list[dict[str, str]]]:
-    """Validate a batch of calls: one per tool, no proposals for completed actions, no-action only alone."""
+    """Validate a batch of calls: one per tool, no proposals for completed actions, no-action only alone.
+
+    Only the first MAX_TOOL_CALLS calls are considered; any beyond are summarized in one rejection record, so the
+    result (and the workflow timeline built from it) stays bounded however many calls the model makes.
+    """
     accepted: list[PlannedToolCall] = []
     rejected: list[dict[str, str]] = []
     completed = completed or set()
-    for index, (name, arguments) in enumerate(calls):
-        if index >= MAX_TOOL_CALLS:
-            rejected.append({"tool_name": safe_tool_name(name), "reason": "too many tool calls"})
-            continue
+    for name, arguments in calls[:MAX_TOOL_CALLS]:
         result = validate_tool_call(name, arguments, offered)
         if isinstance(result, dict):
             rejected.append(result)
@@ -102,6 +104,9 @@ def collect_tool_calls(
             rejected.append({"tool_name": result.tool_name, "reason": "action already completed for this email"})
         else:
             accepted.append(result)
+    if len(calls) > MAX_TOOL_CALLS:
+        ignored = len(calls) - MAX_TOOL_CALLS
+        rejected.append({"tool_name": OVERFLOW_TOOL_NAME, "reason": f"too many tool calls ({ignored} more ignored)"})
     if len(accepted) > 1 and any(c.action_type is ActionType.MARK_NO_ACTION for c in accepted):
         accepted = [c for c in accepted if c.action_type is not ActionType.MARK_NO_ACTION]
         rejected.append({"tool_name": "propose_no_action", "reason": "conflicts with other proposals"})
