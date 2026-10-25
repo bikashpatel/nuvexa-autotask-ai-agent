@@ -12,7 +12,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
 from app.api.errors import register_error_handlers
-from app.api.middleware import CorrelationIdMiddleware, RequestSizeLimitMiddleware, SlidingWindowRateLimiter
+from app.api.middleware import (
+    ControlCharacterGuardMiddleware,
+    CorrelationIdMiddleware,
+    RequestSizeLimitMiddleware,
+    SlidingWindowRateLimiter,
+)
 from app.api.routes import actions, auth, emails, health, integrations, misc, workflows
 from app.core.config import Settings, get_settings
 from app.db.session import Database
@@ -93,6 +98,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
             allow_headers=["content-type", "x-csrf-token", "x-request-id"],
         )
     app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes)
+    app.add_middleware(ControlCharacterGuardMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
 
     api = APIRouter(prefix=API_PREFIX)

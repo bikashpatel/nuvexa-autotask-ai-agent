@@ -71,7 +71,8 @@ def test_factory_wiring(settings: Settings, db: Database, no_side_effects: dict[
     assert no_side_effects["tracing"] == [(settings, "nuvexa-api")]
     assert no_side_effects["instrument"] == [(app, db.engine, settings)]
     names = [m.cls.__name__ for m in app.user_middleware]
-    assert names == ["CorrelationIdMiddleware", "RequestSizeLimitMiddleware"]  # correlation id is outermost
+    # Correlation id is outermost, so the guard's and the size limit's error envelopes carry it.
+    assert names == ["CorrelationIdMiddleware", "ControlCharacterGuardMiddleware", "RequestSizeLimitMiddleware"]
 
 
 async def test_middleware_is_active(settings: Settings, db: Database, no_side_effects: Any) -> None:

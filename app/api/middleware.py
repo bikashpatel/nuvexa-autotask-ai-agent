@@ -1,4 +1,4 @@
-"""Pure-ASGI middleware: correlation ids, request size limits, security headers."""
+"""Pure-ASGI middleware: correlation ids, request size limits, NUL guard, security headers."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import time
 from collections import defaultdict, deque
 from typing import Any
+from urllib.parse import unquote_to_bytes
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -113,22 +114,51 @@ class RequestSizeLimitMiddleware:
         await self.app(scope, replaying_receive, send)
 
 
+class ControlCharacterGuardMiddleware:
+    """Answers 422 for a NUL character in the URL path or query string before the application runs.
+
+    PostgreSQL rejects NUL in text values, so a NUL in a filter or search parameter would otherwise end as a
+    database error (500). Request bodies are checked by `RequestModel`; this covers the URL.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            loc = _nul_location(scope)
+            if loc is not None:
+                detail = {"loc": loc, "msg": "NUL characters are not allowed", "type": "nul_character"}
+                await _error(scope, send, 422, "validation_failed", "The request failed validation.", [detail])
+                return
+        await self.app(scope, receive, send)
+
+
+def _nul_location(scope: Scope) -> list[str] | None:
+    if "\x00" in scope.get("path", ""):
+        return ["path"]
+    for pair in (scope.get("query_string") or b"").split(b"&"):
+        key, _, value = pair.partition(b"=")
+        name = unquote_to_bytes(key.replace(b"+", b" "))
+        if b"\x00" in name:
+            return ["query"]
+        if b"\x00" in unquote_to_bytes(value.replace(b"+", b" ")):
+            return ["query", name.decode("utf-8", "replace")[:64]]
+    return None
+
+
 async def _too_large(scope: Scope, send: Send) -> None:
+    await _error(scope, send, 413, "request_too_large", "Request body is too large.", [])
+
+
+async def _error(scope: Scope, send: Send, status: int, code: str, message: str, details: list[Any]) -> None:
+    """The standard error envelope (app/api/errors.py) for responses sent before the application runs."""
     cid = (scope.get("state") or {}).get("correlation_id")
-    body = json.dumps(
-        {
-            "error": {
-                "code": "request_too_large",
-                "message": "Request body is too large.",
-                "correlation_id": cid,
-                "details": [],
-            }
-        }
-    ).encode()
+    body = json.dumps({"error": {"code": code, "message": message, "correlation_id": cid, "details": details}}).encode()
     await send(
         {
             "type": "http.response.start",
-            "status": 413,
+            "status": status,
             "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
         }
     )

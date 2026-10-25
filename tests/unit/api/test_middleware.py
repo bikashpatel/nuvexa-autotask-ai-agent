@@ -15,6 +15,7 @@ from hypothesis import strategies as st
 from app.api import middleware
 from app.api.middleware import (
     SECURITY_HEADERS,
+    ControlCharacterGuardMiddleware,
     CorrelationIdMiddleware,
     RequestSizeLimitMiddleware,
     SlidingWindowRateLimiter,
@@ -318,6 +319,55 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     now = [1000.0]
     monkeypatch.setattr(middleware.time, "monotonic", lambda: now[0])
     return now
+
+
+# --------------------------------------------------------------------------- NUL in the URL
+
+
+@pytest.mark.parametrize(
+    ("path", "query", "loc"),
+    [
+        ("/api/v1/emails", b"q=%00", ["query", "q"]),
+        ("/api/v1/emails", b"q=abc%00def&limit=5", ["query", "q"]),
+        ("/api/v1/audit-events", b"event_type=x&actor=%00", ["query", "actor"]),
+        ("/api/v1/emails", b"%00=1", ["query"]),
+        ("/api/v1/emails", b"q=a+%00", ["query", "q"]),
+        ("/api/v1/emails/\x00", b"", ["path"]),
+    ],
+)
+async def test_nul_in_the_query_string_or_path_is_rejected_before_the_app(
+    path: str, query: bytes, loc: list[str]
+) -> None:
+    # PostgreSQL rejects NUL in text; it must never reach a query (request bodies are checked by RequestModel).
+    seen: dict[str, Any] = {}
+    sent = Sent()
+    guard = ControlCharacterGuardMiddleware(respond(seen=seen))
+    await guard(http_scope(path, query_string=query), body_receiver(), sent)
+    assert seen == {}
+    assert sent.start["status"] == 422
+    error = json.loads(sent.body)["error"]
+    assert error["code"] == "validation_failed"
+    assert error["details"] == [{"loc": loc, "msg": "NUL characters are not allowed", "type": "nul_character"}]
+    assert "\x00" not in sent.body.decode()
+
+
+@pytest.mark.parametrize("query", [b"", b"q=hello", b"q=%2500", b"q=caf%C3%A9&limit=50", b"q=%ZZ"])
+async def test_urls_without_nul_pass_through(query: bytes) -> None:
+    seen: dict[str, Any] = {}
+    sent = Sent()
+    await ControlCharacterGuardMiddleware(respond(seen=seen))(http_scope(query_string=query), body_receiver(), sent)
+    assert "cid" in seen
+    assert sent.start["status"] == 200
+
+
+async def test_the_nul_guard_ignores_non_http_scopes() -> None:
+    calls: list[str] = []
+
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        calls.append(scope["type"])
+
+    await ControlCharacterGuardMiddleware(app)({"type": "lifespan"}, body_receiver(), Sent())
+    assert calls == ["lifespan"]
 
 
 def test_sliding_window(clock: list[float]) -> None:

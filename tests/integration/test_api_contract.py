@@ -1009,3 +1009,19 @@ async def test_connection_sync_state_reflects_failures(harness: Harness) -> None
     assert sync is not None
     assert sync.last_status.value == "succeeded"
     assert (await member.get("/emails")).json()["total"] == DEMO_MESSAGE_COUNT
+
+
+async def test_nul_in_query_parameters_is_a_validation_error_not_a_database_error(harness: Harness) -> None:
+    # PostgreSQL rejects NUL in text parameters; the API answers 422 before any query runs.
+    member, _ = await _member_world(harness)
+    for path, params in [
+        ("/emails", {"q": "a\x00b"}),
+        ("/audit-events", {"event_type": "\x00"}),
+        ("/workflows", {"status": "pending_approval\x00"}),
+    ]:
+        resp = await member.get(path, params=params)
+        assert resp.status_code == 422, (path, resp.text)
+        body = resp.json()["error"]
+        assert body["code"] == "validation_failed"
+        assert body["details"][0]["type"] == "nul_character"
+        assert body["correlation_id"]
