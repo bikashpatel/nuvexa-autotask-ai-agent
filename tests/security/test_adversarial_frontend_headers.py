@@ -439,3 +439,11 @@ def test_cache_control_header_is_still_added_to_error_responses(server: Directiv
 def test_api_proxy_does_not_compress_dynamic_responses(server: Directive) -> None:
     # BREACH-style length side channels on authenticated JSON: gzip must be off for /api/.
     assert [d.args for d in _children(_location(server, "/api/"), "gzip")] == [["off"]]
+
+
+def test_hashed_assets_are_served_without_byte_ranges(server: Directive) -> None:
+    # A 416 (unsatisfiable Range) passes the header filter twice and was sent two Cache-Control headers
+    # (`immutable`, then `no-store`). Hashed JS/CSS/fonts never need ranges: `max_ranges 0` answers every
+    # Range request with the full 200, so neither 206 nor 416 can occur under /assets/.
+    assets = _location(server, "/assets/")
+    assert [d.args for d in _children(assets, "max_ranges")] == [["0"]]

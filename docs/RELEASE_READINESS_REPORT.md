@@ -233,7 +233,6 @@ Defects found in earlier phases (Prompt 1, F-01…F-25) are in [SECURITY_AUDIT.m
 | Re-created Entra user (same e-mail, new object id) is refused | Sign-in blocked until an admin clears the old row (no UI) | Operations runbook ([setup-microsoft-entra.md](setup-microsoft-entra.md)) |
 | Sync rounds have no overall deadline or byte cap (up to `MAIL_SYNC_MAX_MESSAGES` bodies per round) | Slow or very large mailboxes hold a worker longer | Keep defaults; monitor sync duration |
 | OpenTelemetry auto-instrumentation not tested for exception-attribute export | Exception messages could reach the trace backend when `OTEL_ENABLED=true` | Verify against a collector before enabling in production |
-| 416 responses under `/assets/` carry two Cache-Control headers (`no-store` wins) | None known | Optional `max_ranges 0` |
 | Heuristic demo agent: 47 % category accuracy on the holdout set | Demo mode only — real use needs the OpenAI/Azure OpenAI provider, whose quality on real mail was not measured | Evaluate the configured model on representative, consented mail before go-live |
 
 Not performed: dynamic application scanning (DAST), external penetration testing, load and soak testing,
