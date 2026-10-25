@@ -20,7 +20,7 @@ and `e2e` only on request.
 | `backend-sqlite` | the whole suite on SQLite (the demo-mode database) with the coverage gate | as above |
 | `frontend` | 1 `npm ci` · 2 Prettier + ESLint · 3 `tsc` · tests with coverage thresholds · 12 build | any failure; coverage below `frontend/vite.config.ts` thresholds (statements 99, branches 98, functions 100, lines 100) |
 | `dependency-audit` | 9 pip-audit, npm audit, npm registry signatures · 15 SBOMs | a known vulnerability in any locked Python package (all groups, hash-verified); a high/critical npm advisory; a package failing registry signature verification |
-| `secret-scan` | 10 gitleaks over every commit | any leak; a scan that saw fewer commits than HEAD has |
+| `secret-scan` | 10 gitleaks over every commit on every fetched ref, merges included (`git log -m`, so content written while resolving a merge conflict is scanned) | any leak; a shallow clone; a scan that saw fewer commits than git shows a diff for |
 | `sast` | 11 semgrep (Python, TypeScript/React, OWASP Top 10, Dockerfile, GitHub Actions, secrets) + bandit | any semgrep finding (`--error`); any bandit finding at any severity |
 | `containers` | 12 image builds (never pushed) · 13 Trivy vulnerability + secret scan · 15 image SBOMs and metadata | any HIGH/CRITICAL vulnerability with a published fix; any secret in an image |
 | `pipeline-config` | 13 Trivy misconfiguration scan (Dockerfiles, generated Azure ARM template) · Bicep lint and `infra/azure/main.json` in sync with `main.bicep` (pinned, checksum-verified Bicep CLI, offline) · actionlint · zizmor · exception register | any misconfiguration (LOW and above); any Bicep diagnostic or a stale `main.json`; any workflow lint or workflow-security finding; an unregistered, unknown, uncited or expired exception |
@@ -200,7 +200,7 @@ GitHub Actions results (run 40148542307; run 40149198842 matched):
 | Backend on SQLite | 3,143 passed, 12 skipped, 5 strict xfail; 99.57 % |
 | Frontend | format, lint, typecheck; 1,167 tests within the thresholds; build |
 | Dependency audit | pip-audit: no known vulnerabilities; npm audit: 0; 293 packages with verified registry signatures (`fsevents` is macOS-only); SBOMs published |
-| Secret scan | gitleaks: no leaks; the checkout includes other fetched branches, so the scan covered more commits than HEAD |
+| Secret scan | gitleaks: no leaks; the checkout includes other fetched branches, so the scan covered more commits than HEAD (that run predates `-m`: merge diffs were not scanned, and the count check passed only because the other branches outnumbered HEAD's merges; corrected in P5-37) |
 | SAST | semgrep 0 findings; bandit no issues |
 | Containers | backend 0 fixable (44 HIGH, 58 MEDIUM, 61 LOW, 1 UNKNOWN without a fix: SEC-EX-001); frontend 0; runtime users `10001:10001` and `nginx` |
 | Configuration | Trivy config clean; actionlint clean; zizmor online audits clean; exception register valid |

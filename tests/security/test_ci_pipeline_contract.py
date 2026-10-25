@@ -208,3 +208,19 @@ def test_coverage_thresholds_are_never_lowered() -> None:
         match = re.search(rf"{metric}:\s*(\d+(?:\.\d+)?)", vite)
         assert match, metric
         assert float(match.group(1)) >= floor, f"frontend {metric} threshold lowered"
+
+
+def test_the_secret_scan_covers_merge_commits_and_refuses_partial_history() -> None:
+    script = SCAN_SCRIPT.read_text()
+    # Without -m, git log -p shows no diff for a merge commit, so content written while resolving a merge
+    # conflict would never be scanned.
+    opts = re.search(r"^GITLEAKS_LOG_OPTS=\((.*)\)$", script, re.M)
+    assert opts, "scripts/security-scan.sh defines GITLEAKS_LOG_OPTS"
+    assert set(opts.group(1).split()) >= {"--full-history", "--all", "-m"}
+    body = _stage_body("secrets")
+    assert '--log-opts="${GITLEAKS_LOG_OPTS[*]}"' in body
+    # The scanned count is checked against every commit git shows a diff for, not a count gitleaks cannot reach,
+    # and a shallow clone is refused outright (its short history would also satisfy the count).
+    assert 'expected="$(commits_with_diffs)"' in body
+    assert '[ "$scanned" -ge "$expected" ]' in body
+    assert "git rev-parse --is-shallow-repository" in body

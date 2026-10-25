@@ -5,7 +5,8 @@
 #   scripts/security-scan.sh deps      # pip-audit (every locked Python package, hash-verified), npm audit,
 #                                      #   npm registry signatures
 #   scripts/security-scan.sh sbom      # CycloneDX SBOMs: Python runtime + all groups, npm runtime
-#   scripts/security-scan.sh secrets   # gitleaks over the full git history (default rules + .gitleaks.toml)
+#   scripts/security-scan.sh secrets   # gitleaks over the full git history, merges included (default rules +
+#                                      #   .gitleaks.toml)
 #   scripts/security-scan.sh sast      # semgrep (Python, TypeScript/React, OWASP Top 10, Dockerfile, Actions,
 #                                      #   secrets) + bandit
 #   scripts/security-scan.sh images    # Trivy on nuvexa-backend:$IMAGE_TAG and nuvexa-frontend:$IMAGE_TAG
@@ -24,6 +25,9 @@ SEMGREP_IMAGE="semgrep/semgrep:1.181.0@sha256:81474464c1f07483ba0682a44787fd93c9
 TRIVY_IMAGE="aquasec/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222"
 ACTIONLINT_IMAGE="rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667"
 ZIZMOR_IMAGE="ghcr.io/zizmorcore/zizmor:1.31.1@sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9"
+# gitleaks runs `git log -p -U0` with these options. Without -m git shows no diff for a merge commit, so content
+# written while resolving a merge conflict would never be scanned; with -m each merge is diffed against each parent.
+GITLEAKS_LOG_OPTS=(--full-history --all -m)
 # Bicep CLI (infrastructure as code): the official release binary, verified against these SHA-256 sums, runs without
 # network access in the pinned .NET runtime-deps image (the binary is a self-contained .NET application).
 BICEP_IMAGE="mcr.microsoft.com/dotnet/runtime-deps:10.0.12-noble-chiseled@sha256:dc5cd0c7d0a39b825312b4f0986d99b9adf9b6a3af69bc23cd345c27d9ed916a"
@@ -96,17 +100,30 @@ stage_sbom() {
   ls -l "$OUT"/sbom-*.cdx.json
 }
 
+# The number of commits `git log -p` with gitleaks' options shows a diff for: the commits gitleaks must report as
+# scanned. Empty commits have no diff, and gitleaks does not count them.
+commits_with_diffs() {
+  git log -p -U0 "${GITLEAKS_LOG_OPTS[@]}" --format='commit %H' \
+    | awk '$1 == "commit" && NF == 2 { c = $2; next } /^diff --git / && c != "" && !(c in seen) { seen[c]; n++ } END { print n + 0 }'
+}
+
 stage_secrets() {
-  echo "== gitleaks: every commit (default rules + precise allowlists in .gitleaks.toml)"
+  echo "== gitleaks: every commit on every ref, merges included (default rules + precise allowlists in .gitleaks.toml)"
+  # A scan that silently saw partial history must not pass: a shallow clone (its short history would also satisfy
+  # the count below), a git ownership error, or a merge left unscanned.
+  if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+    echo "refusing to scan a shallow clone: fetch the full history (actions/checkout fetch-depth: 0)" >&2
+    return 1
+  fi
   gitleaks git --config /repo/.gitleaks.toml --redact --no-banner --no-color --exit-code 1 \
+    --log-opts="${GITLEAKS_LOG_OPTS[*]}" \
     --report-format sarif --report-path /out/gitleaks.sarif . 2>&1 | tee "$OUT/gitleaks.log"
-  # A scan that silently saw no history must not pass (e.g. a shallow clone or a git ownership error).
   local scanned expected
   scanned="$(grep -oE '[0-9]+ commits scanned' "$OUT/gitleaks.log" | grep -oE '^[0-9]+' || echo 0)"
-  expected="$(git rev-list --count HEAD)"
-  echo "gitleaks scanned ${scanned} commit(s); HEAD has ${expected}"
+  expected="$(commits_with_diffs)"
+  echo "gitleaks scanned ${scanned} commit(s); git shows a diff for ${expected}"
   [ "$scanned" -ge "$expected" ]
-  summary "### Secret scan" "- gitleaks: no leaks in ${scanned} commits"
+  summary "### Secret scan" "- gitleaks: no leaks in ${scanned} commits (merges included)"
 }
 
 stage_sast() {
