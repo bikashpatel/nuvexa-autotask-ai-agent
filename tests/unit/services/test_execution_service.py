@@ -706,6 +706,8 @@ async def test_execute_refuses_tampered_payload(
         await svc.execute(session, world.actor(world.owner), action.id)
     [audit] = await fresh.audits("payload_integrity_failure", action_id=action.id)
     assert audit.outcome is AuditOutcome.DENIED
+    # Visible in the tenant's audit log and attributed to the user who tried to execute.
+    assert (audit.tenant_id, audit.actor_user_id) == (action.tenant_id, world.owner.id)
     assert ado.clients == []
     assert (await _action(fresh, action)).status is S.APPROVED
 
