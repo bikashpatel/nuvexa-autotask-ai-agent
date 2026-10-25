@@ -12,8 +12,10 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
 * **CSRF:** for `POST`/`PUT`/`PATCH`/`DELETE`, send header `X-CSRF-Token` with the value of the
   readable `nuvexa_csrf` cookie (`403 csrf_failed` otherwise). Public auth POSTs are exempt.
 * **Correlation:** send optional `X-Request-ID`; every response echoes `X-Request-ID`.
-* **Pagination:** `?limit=` (1–100, default 25) and `?offset=`; response `Page<T>` =
-  `{ "items": T[], "total": n, "limit": n, "offset": n }`.
+* **Pagination:** `?limit=` (1–100, default 25) and `?offset=` (0–1,000,000; larger → `422`); response
+  `Page<T>` = `{ "items": T[], "total": n, "limit": n, "offset": n }`.
+* **Text input:** a NUL character anywhere in a request body string, the query string or the path is
+  rejected with `422 validation_failed` (`details[].type = "nul_character"`); the value is never echoed.
 * **Errors:** every non-2xx response has the shape
 
   ```json
@@ -28,10 +30,10 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
   | 404 | `not_found` (also returned for resources in another tenant / not visible) |
   | 409 | `conflict`, `stale_version`, `invalid_state_transition`, `integration_not_configured` |
   | 500 | `configuration_error` (e.g. Microsoft sign-in requested but Entra ID is not configured), `internal_error` |
-  | 413 | `request_too_large` |
+  | 413 | `request_too_large` (declared or streamed body over `MAX_REQUEST_BYTES`) |
   | 422 | `validation_failed` (`details` lists field errors) |
   | 429 | `rate_limited` |
-  | 502 | `integration_error`, `agent_error` |
+  | 502 | `integration_error`, `agent_error` — Azure DevOps errors carry only stable identifiers (`TFnnnnnn`, exception type, field reference), never the upstream message text |
 
 * **Async work:** sync, analysis, re-analysis and execution are queued jobs (`202`). Poll the
   workflow/action resource. Workflow statuses `received…action_proposed` and `executing`, and action
@@ -58,10 +60,10 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
 ### Integrations
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/integrations` | `IntegrationsOut` (Microsoft connections + sync state, Azure DevOps mode/config, LLM provider) |
-| GET | `/integrations/microsoft/connect?redirect_to=/integrations` | browser navigation → 302 to consent (`Mail.Read`) |
-| GET | `/integrations/azure-devops/connect?redirect_to=/integrations` | `entra_delegated` mode only → 302 |
-| DELETE | `/integrations/connections/{id}` | 204, deletes stored tokens, stops sync |
+| GET | `/integrations` | `IntegrationsOut` (Microsoft connections + sync state, Azure DevOps mode/config, LLM provider). `azure_devops.connection` is the caller's own delegated Azure DevOps connection (`ConnectionOut`, including `needs_reauth` ones) or `null` |
+| GET | `/integrations/microsoft/connect?redirect_to=/integrations` | requires `email:sync`; browser navigation → 302 to consent (`Mail.Read`) |
+| GET | `/integrations/azure-devops/connect?redirect_to=/integrations` | requires `action:execute`; `entra_delegated` mode only → 302 |
+| DELETE | `/integrations/connections/{id}` | 204, deletes stored tokens, stops sync (mailbox or Azure DevOps connection; owner only, others → 404) |
 | GET | `/integrations/azure-devops/test` | `AdoConnectionTestOut` |
 | GET | `/integrations/azure-devops/projects` | `AdoProjectsOut` |
 | GET | `/integrations/azure-devops/projects/{project}/work-item-types` | `AdoWorkItemTypesOut` |
@@ -72,7 +74,7 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
 |---|---|---|
 | GET | `/emails` | `Page<EmailListItem>`; filters `q` (subject/sender), `category`, `priority`, `analysis_status`, `connected_account_id` |
 | GET | `/emails/{id}` | `EmailDetail` (body is plain text; render as text, never HTML) |
-| POST | `/emails/sync` | Body `SyncRequest {connected_account_id?}` → 202 `JobAccepted` |
+| POST | `/emails/sync` | Body `SyncRequest {connected_account_id?}` → 202 `JobAccepted`. An id that is not the caller's → 404; the caller's own unusable connection (`needs_reauth`, disconnected, not a mailbox) → 409. Mailboxes of deactivated users are never synced |
 | POST | `/emails/{id}/analyze` | 202 `StartAnalysisOut` (`created=false` when an active run already exists) |
 
 ### Workflows
@@ -122,6 +124,7 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
 |---|---|---|---|---|
 | read own emails/actions | ✓ | ✓ | ✓ | ✓ |
 | read tenant-wide emails/actions/audit | | | ✓ | ✓ |
+| connect a mailbox / Azure DevOps (delegated tokens) | | ✓ | ✓ | ✓ |
 | sync, analyze, edit/approve/reject/cancel/execute **own** actions | | ✓ | ✓ | ✓ |
 | approve/reject/execute **others'** actions | | | ✓ | ✓ |
 | change settings | | | | ✓ |
@@ -132,3 +135,6 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
 The Azure DevOps diagnostic endpoints (`/integrations/azure-devops/test|projects|…|validate`) use the
 service credentials and require `action:edit` (members and above). Rate limits are keyed by the verified
 user (authenticated routes) or client IP (sign-in routes).
+
+Refused sign-ins (deactivated user, an Entra identity that does not own the matching account) are audited
+as `event_type=login` with `outcome=denied`.

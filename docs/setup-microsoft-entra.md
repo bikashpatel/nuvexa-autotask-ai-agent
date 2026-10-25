@@ -161,7 +161,7 @@ TOKEN_ENCRYPTION_KEYS=<output of: uv run nuvexa gen-key>
 | `ENTRA_TENANT_ID` | Authority tenant: a tenant ID for single-tenant, `organizations` for multi-tenant work/school accounts |
 | `ENTRA_ALLOWED_TENANT_IDS` | Comma-separated tenant IDs whose users may sign in; others are rejected. Set it even for single-tenant apps |
 | `ENTRA_AUTHORITY_HOST` | Default `https://login.microsoftonline.com` (public cloud). National clouds also need a matching `GRAPH_BASE_URL`; not tested |
-| `BOOTSTRAP_ADMIN_EMAILS` | Comma-separated, case-insensitive. Only these addresses can be bootstrapped as the first tenant administrator on sign-in. Keep the list to named people |
+| `BOOTSTRAP_ADMIN_EMAILS` | Comma-separated, case-insensitive. An account with one of these addresses becomes admin only when it is created or first bound to an Entra identity — never on a later sign-in, and a removed role is not restored. Keep the list to named people, sign them in right after deployment, then clear it |
 | `TOKEN_ENCRYPTION_KEYS` | Required once real tokens are stored (and always in production) |
 | `DEMO_MODE` | May stay `true` in development (demo mailbox and personas remain available); set `false` for shared or production environments |
 
@@ -200,7 +200,10 @@ Problems: [troubleshooting.md](troubleshooting.md).
 ## Production checklist
 
 - [ ] Dedicated production registration; only `https://` redirect URIs; no localhost entries.
-- [ ] `ENTRA_ALLOWED_TENANT_IDS` set; `BOOTSTRAP_ADMIN_EMAILS` limited to named administrators.
+- [ ] `ENTRA_ALLOWED_TENANT_IDS` set; `BOOTSTRAP_ADMIN_EMAILS` limited to named administrators, who sign in
+      immediately after deployment; then clear the list.
+- [ ] Operations note: users are identified by Entra object id. A re-created Entra user (same e-mail, new
+      object id) is refused until an administrator deactivates or removes the old user row (no UI yet).
 - [ ] Client secret in Key Vault with an expiry reminder and a rotation runbook.
 - [ ] `TOKEN_ENCRYPTION_KEYS` in Key Vault; rotation procedure documented.
 - [ ] Only the delegated permissions listed above; no application permissions.

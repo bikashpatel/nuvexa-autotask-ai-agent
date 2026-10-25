@@ -64,8 +64,11 @@ LLM output crosses the boundary only after Pydantic validation **and** policy va
 
 * Every query goes through repository helpers that require a `tenant_id`; non-privileged users are
   additionally scoped to `owner_user_id`.
-* IDs are random UUIDv4; missing and forbidden resources both return 404 for reads to avoid
-  enumeration; explicit denials on writes are audited (`permission_denied`).
+* IDs are random UUIDv4; missing and forbidden resources both return 404 (reads, and ids named in
+  request bodies such as `SyncRequest.connected_account_id`) to avoid enumeration; explicit denials on
+  writes are audited (`permission_denied`).
+* Viewers are read-only: they cannot store delegated tokens (connecting a mailbox needs `email:sync`,
+  connecting Azure DevOps needs `action:execute`).
 
 ### OAuth / session
 
@@ -73,15 +76,26 @@ LLM output crosses the boundary only after Pydantic validation **and** policy va
   10-minute expiry, bound to a random browser-binding cookie (`nuvexa_oauth_bind`) → login CSRF
   protection.
 * Redirect URI comes from configuration and is validated against `OAUTH_REDIRECT_URI`; post-login
-  redirects are restricted to relative paths.
-* Tenant restriction: `ENTRA_ALLOWED_TENANT_IDS`; first-admin bootstrap only for
-  `BOOTSTRAP_ADMIN_EMAILS`.
+  redirects are restricted to relative paths by an allow-list on the server and, in the browser, an
+  allow-list plus a same-origin check (`safeRedirectPath`).
+* **Identity is the verified (`tid`, `oid`) pair**, never the `email`/`preferred_username` claim, which
+  is mutable and unverified ("nOAuth"). An e-mail match only binds a pre-provisioned account that no
+  Entra identity owns yet, in the same tenant; any other identity is refused and audited
+  (`login`, `outcome=denied`). Deactivated users are refused the same way (Entra and demo sign-in).
+* Tenant restriction: `ENTRA_ALLOWED_TENANT_IDS`. `BOOTSTRAP_ADMIN_EMAILS` grants admin only when an
+  account is created or first bound, never on later sign-ins (a demoted admin stays demoted). Residual
+  risk: until the named administrator has signed in once, another principal in an allowed tenant whose
+  directory e-mail equals a listed address could claim it — sign the administrator in right after
+  deployment and then clear the list.
 * Session cookie `HttpOnly`, `Secure` (except local dev), `SameSite=Lax`; CSRF double-submit on
   unsafe methods; session rotation on login; logout revokes server-side.
 
 ### Transport and input limits
 
-* Request body limit (`MAX_REQUEST_BYTES`, default 1 MiB).
+* Request body limit (`MAX_REQUEST_BYTES`, default 1 MiB): `413` for declared and streamed bodies;
+  pagination offsets are bounded; NUL characters in bodies, query strings and paths are rejected
+  (`422`) because PostgreSQL cannot store them. Graph fields are cleaned and clipped to their columns on
+  ingestion; a message the database still rejects is skipped and recorded, never blocking the mailbox.
 * In-process rate limiting on auth, sync, analyze, approve and execute routes. **Limitation:** limits
   are per replica; for multi-replica deployments configure a shared limit at the ingress / API
   gateway.
@@ -93,6 +107,9 @@ LLM output crosses the boundary only after Pydantic validation **and** policy va
 
 * A structlog processor redacts keys matching `token|secret|password|authorization|cookie|body|
   api_key|client_secret|code_verifier`, and truncates long strings.
+* Upstream error text is not trusted: Azure DevOps errors are reduced to stable identifiers (`TFnnnnnn`,
+  exception type, field reference) before they are stored, returned or logged, because providers can
+  echo credentials back.
 * Email bodies are not logged (`LOG_EMAIL_CONTENT=false` default). Spans carry IDs, sizes,
   categories and token counts — not content.
 * No chain-of-thought is requested or stored. Only concise rationales and evidence references.
