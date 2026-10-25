@@ -300,11 +300,14 @@ async def test_heuristic_pipeline_resists_each_attack(case: str, body: str, rule
     assert all(screen_for_injection(e.quote) == [] for e in extraction.evidence)
 
 
-def test_long_hidden_run_excerpt_is_truncated_with_ellipsis() -> None:
-    flags = screen_for_injection("start " + ZW * 400 + " end")
+def test_long_hidden_run_excerpt_is_bounded_and_shows_no_invisible_characters() -> None:
+    # Regression (Prompt 5): the excerpt used to be the invisible run itself (truncated); it now names the trick.
+    flags = screen_for_injection("x" * 500 + " start " + ZW * 400 + " end " + "y" * 500)
     assert [f.rule for f in flags] == ["hidden_text"]
-    assert len(flags[0].excerpt) == MAX_EXCERPT_CHARS
-    assert flags[0].excerpt.endswith("…")
+    assert flags[0].excerpt.startswith("400 consecutive invisible characters near: ")
+    assert "start end" in flags[0].excerpt
+    assert len(flags[0].excerpt) <= MAX_EXCERPT_CHARS
+    assert ZW not in flags[0].excerpt
 
 
 @settings(max_examples=150, deadline=None)

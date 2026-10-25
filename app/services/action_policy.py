@@ -18,7 +18,7 @@ from app.core.config import Settings
 from app.core.security import sha256_hex
 from app.db.models import EmailMessage
 from app.domain.enums import ActionType, Priority
-from app.integrations.azure_devops.mapping import RESERVED_FIELDS
+from app.integrations.azure_devops.mapping import IDEMPOTENCY_TAG_PREFIX, RESERVED_FIELDS
 from app.schemas.actions import (
     AzureDevOpsWorkItemPayload,
     EmailReplyDraftPayload,
@@ -84,6 +84,11 @@ def payload_title(payload: AnyPayload) -> str:
             return f"Follow-up: {payload.title}"[:255]
         case NoActionPayload():
             return "Mark as no action required"
+
+
+def _is_reserved_tag(tag: str) -> bool:
+    """Azure DevOps compares tags case-insensitively; the idempotency-tag prefix belongs to the system."""
+    return tag.strip().lower().startswith(IDEMPOTENCY_TAG_PREFIX)
 
 
 def _clip(value: str, limit: int) -> str:
@@ -162,6 +167,12 @@ class ActionPolicy:
             wit = fallback
         priority = self.ts.priority.azure_devops_priority.get(args.priority, 3)
         tags = [t for t in (tag.strip() for tag in args.tags[:5]) if t and ";" not in t and len(t) <= 64]
+        if reserved := [t for t in tags if _is_reserved_tag(t)]:
+            tags = [t for t in tags if not _is_reserved_tag(t)]
+            warnings.append(
+                f"{len(reserved)} proposed tag(s) used the reserved '{IDEMPOTENCY_TAG_PREFIX}' prefix and were "
+                "removed; only NUVEXA adds that tag."
+            )
         tags.append(f"category-{category.value.replace('_', '-')}")
         extra: dict[str, str | int | float] = {}
         for pf in analysis.extraction.proposed_fields:
@@ -293,6 +304,12 @@ class ActionPolicy:
                         issues.append(f"Field '{name}' can only be set through its dedicated attribute.")
                     elif name not in ado.allowed_additional_fields:
                         issues.append(f"Field '{name}' is not in the allowed field list.")
+                for tag in payload.tags:
+                    if _is_reserved_tag(tag):  # another action's idempotency tag would confuse its reconcile
+                        issues.append(
+                            f"Tag '{_clip(tag, 64)}' uses the reserved '{IDEMPOTENCY_TAG_PREFIX}' prefix; "
+                            "NUVEXA adds its own tag."
+                        )
             case EmailReplyDraftPayload():
                 if email is not None and [str(a).lower() for a in payload.to] != [(email.sender_address or "").lower()]:
                     issues.append("Reply recipients must be exactly the original sender.")

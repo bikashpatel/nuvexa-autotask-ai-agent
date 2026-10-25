@@ -372,9 +372,7 @@ async def test_one_message_rejected_by_the_database_does_not_block_the_rest_of_t
     assert healthy <= stored, f"{len(healthy - stored)} of {len(healthy)} healthy messages were never ingested"
 
 
-# DEFECT: catastrophic backtracking in the `fake_role_tag` rule (`<{2,}…` with no anchor): screening is
-# quadratic in the length of a run of "<" — ~7 s for 20k characters, ~10+ minutes at SCREEN_LIMIT_CHARS — and
-# it runs synchronously (twice per node, in every analysis node) inside the worker's event loop.
+# Regression (Prompt 5): `fake_role_tag` starts only at the first "<" of a run and never backtracks (was quadratic).
 def test_injection_screening_is_linear_on_runs_of_angle_brackets() -> None:
     started = time.perf_counter()
     screen_for_injection("<" * 10_000)

@@ -128,12 +128,14 @@ def _attachments(value: Any) -> list[AttachmentMeta]:
 
 
 def _body(value: Any) -> tuple[str, Literal["text", "html"]]:
+    # Invisible-character tricks (bidi overrides, tag characters, runs of invisibles) are replaced by a visible
+    # marker rather than dropped silently: the stored text is clean, and the analysis still reports them.
     if not isinstance(value, Mapping):
         return "", "text"
     content = _str(value.get("content")) or ""
     if str(value.get("contentType", "")).lower() == "html":
-        return html_to_text(content), "html"
-    return normalize_text(content), "text"
+        return html_to_text(content, mark_hidden=True), "html"
+    return normalize_text(content, mark_hidden=True), "text"
 
 
 def _web_link(value: Any) -> str | None:
@@ -164,7 +166,7 @@ def normalize_graph_message(
     preview_raw = _str(item.get("bodyPreview"))
     preview = normalize_text(preview_raw) if preview_raw is not None else body_text
     subject_raw = _str(item.get("subject")) or ""
-    subject = " ".join(normalize_text(subject_raw).split())
+    subject = " ".join(normalize_text(subject_raw, mark_hidden=True).split())
     sender = _address(item.get("from")) or _address(item.get("sender"))
     importance = _str(item.get("importance"))
     attachments = _attachments(item.get("attachments"))

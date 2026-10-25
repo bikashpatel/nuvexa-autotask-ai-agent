@@ -18,7 +18,7 @@ from app.agents.factory import build_analysis_agent
 from app.agents.heuristic import HeuristicAnalysisAgent
 from app.agents.openai_agent import OpenAIAnalysisAgent
 from app.core.config import LLMProvider
-from app.domain.enums import ActionType, EmailCategory, Priority, Urgency
+from app.domain.enums import ActionType, EmailCategory, FailureCategory, Priority, Urgency
 from app.schemas.ai import ClassificationOutput, ExtractionOutput
 from app.schemas.settings import TaxonomyConfig
 from tests.conftest import make_settings
@@ -89,17 +89,42 @@ def tool_call(name: str, arguments: Any) -> Any:
     return SimpleNamespace(id="call_1", type="function", function=SimpleNamespace(name=name, arguments=raw))
 
 
+class Unprocessable:
+    """A queued response whose body the SDK fails to process (`.parse()` of the raw response raises)."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+
+class FakeRawResponse:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+
+    def parse(self) -> Any:
+        if isinstance(self.response, Unprocessable):
+            raise self.response.error
+        return self.response
+
+
 class FakeCompletions:
+    """`client.chat.completions` as the agent uses it: `with_raw_response.parse/create` (HTTP), then `.parse()`."""
+
     def __init__(self, responses: list[Any]) -> None:
         self.responses = list(responses)
         self.calls: list[dict[str, Any]] = []
+        self.methods: list[str] = []
+        self.with_raw_response = SimpleNamespace(parse=self._raw("parse"), create=self._raw("create"))
 
-    async def parse(self, **kwargs: Any) -> Any:
-        self.calls.append(kwargs)
-        response = self.responses.pop(0)
-        if isinstance(response, BaseException):
-            raise response
-        return response
+    def _raw(self, method: str) -> Any:
+        async def send(**kwargs: Any) -> FakeRawResponse:
+            self.calls.append(kwargs)
+            self.methods.append(method)
+            response = self.responses.pop(0)
+            if isinstance(response, BaseException):  # raised by the HTTP exchange (status, connection, ...)
+                raise response
+            return FakeRawResponse(response)
+
+        return send
 
 
 class FakeClient:
@@ -701,3 +726,111 @@ async def test_aclose_tolerates_clients_without_close() -> None:
     holder = SimpleNamespace(close="not callable", chat=None)
     agent = OpenAIAnalysisAgent(settings, client=holder)  # type: ignore[arg-type]
     await agent.aclose()
+
+
+# ---------------------------------------------------------------------------------------------
+# Prompt 5: SDK method per step, unprocessable responses, failure categories
+# ---------------------------------------------------------------------------------------------
+
+
+async def test_structured_steps_use_parse_and_the_plan_step_uses_create(make_ctx, planning_context) -> None:
+    tools = [tool_call("propose_azure_devops_work_item", WORK_ITEM_ARGS)]
+    agent, fake = make_agent(
+        completion(parsed=CLASSIFICATION), completion(parsed=EXTRACTION), completion(tool_calls=tools)
+    )
+    ctx = make_ctx(SPEC_BODY)
+    await agent.classify(ctx, TaxonomyConfig())
+    await agent.extract(ctx, CLASSIFICATION)
+    await agent.plan(ctx, CLASSIFICATION, EXTRACTION, planning_context())
+    assert fake.methods == ["parse", "parse", "create"]
+    assert "response_format" not in fake.calls[2]
+
+
+async def test_one_malformed_tool_call_is_rejected_alone(make_ctx, planning_context) -> None:
+    calls = [tool_call("propose_azure_devops_work_item", WORK_ITEM_ARGS), tool_call("propose_email_reply", '{"sub')]
+    agent, _ = make_agent(completion(tool_calls=calls))
+    result = await agent.plan(make_ctx(SPEC_BODY), CLASSIFICATION, EXTRACTION, planning_context())
+    assert [c.tool_name for c in result.tool_calls] == ["propose_azure_devops_work_item"]
+    assert [(r["tool_name"], r["reason"].split(" (")[0]) for r in result.rejected_calls] == [
+        ("propose_email_reply", "invalid arguments")
+    ]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        Unprocessable(AttributeError("'str' object has no attribute 'choices'")),  # parse() of an HTML page
+        Unprocessable(KeyError("choices")),
+        "<html><body>Please sign in to the corporate proxy</body></html>",  # create() returns non-JSON as text
+        b"\x00binary",
+    ],
+)
+async def test_a_response_that_is_not_a_chat_completion_is_a_provider_error(make_ctx, spans, response) -> None:
+    agent, _ = make_agent(response)
+    with pytest.raises(AgentProviderError) as exc:
+        await agent.classify(make_ctx(SPEC_BODY), TaxonomyConfig())
+    assert exc.value.message == "The model provider returned a response that is not a valid chat completion."
+    assert (exc.value.retryable, exc.value.category) == (True, FailureCategory.LLM_PROVIDER)
+    assert "proxy" not in exc.value.message
+    assert spans[0]["error.type"] == "AgentProviderError"
+
+
+def _validation_error() -> ValidationError:
+    try:
+        ClassificationOutput.model_validate_json("{}")
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("unreachable")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        openai.LengthFinishReasonError(completion=completion()),  # type: ignore[arg-type]
+        openai.ContentFilterFinishReasonError(),
+        _validation_error(),
+        _json_error(),
+    ],
+)
+async def test_sdk_errors_while_processing_the_body_keep_their_mapping(make_ctx, error) -> None:
+    agent, _ = make_agent(Unprocessable(error))
+    with pytest.raises(AgentOutputError):
+        await agent.classify(make_ctx(SPEC_BODY), TaxonomyConfig())
+
+
+async def test_errors_building_the_request_are_not_mapped(make_ctx) -> None:
+    agent, _ = make_agent(TypeError("unexpected keyword argument"))  # a programming error, before any response
+    with pytest.raises(TypeError):
+        await agent.classify(make_ctx(SPEC_BODY), TaxonomyConfig())
+
+
+@pytest.mark.parametrize(
+    ("error", "category"),
+    [
+        (_status_error(openai.AuthenticationError, 401), FailureCategory.AUTHORIZATION),
+        (_status_error(openai.PermissionDeniedError, 403), FailureCategory.AUTHORIZATION),
+        (_status_error(openai.BadRequestError, 400), FailureCategory.CONFIGURATION),
+        (_status_error(openai.NotFoundError, 404, code="DeploymentNotFound"), FailureCategory.CONFIGURATION),
+        (_status_error(openai.UnprocessableEntityError, 422), FailureCategory.CONFIGURATION),
+        (_status_error(openai.BadRequestError, 400, code="content_filter"), FailureCategory.LLM_OUTPUT),
+        (_status_error(openai.InternalServerError, 500), FailureCategory.LLM_PROVIDER),
+        (_status_error(openai.RateLimitError, 429), FailureCategory.LLM_PROVIDER),
+        (openai.APITimeoutError(request=REQUEST), FailureCategory.LLM_PROVIDER),
+        (openai.APIResponseValidationError(httpx2.Response(200, request=REQUEST), None), FailureCategory.LLM_PROVIDER),
+        (openai.OpenAIError("The api_key client option must be set"), FailureCategory.CONFIGURATION),
+        (openai.ContentFilterFinishReasonError(), FailureCategory.LLM_OUTPUT),
+        (_json_error(), FailureCategory.LLM_OUTPUT),
+    ],
+)
+def test_map_provider_error_assigns_a_failure_category(error: Exception, category: FailureCategory) -> None:
+    mapped = openai_agent.map_provider_error(error)
+    assert mapped is not None
+    assert mapped.category is category
+
+
+def test_agent_error_category_defaults_and_overrides() -> None:
+    assert AgentError("x").category is FailureCategory.LLM_PROVIDER
+    assert AgentError("x", category=FailureCategory.CONFIGURATION).category is FailureCategory.CONFIGURATION
+    assert AgentError("x").category is FailureCategory.LLM_PROVIDER  # the override is per instance
+    assert AgentOutputError("x").category is FailureCategory.LLM_OUTPUT
+    assert AgentProviderError("x").category is FailureCategory.LLM_PROVIDER

@@ -1,8 +1,9 @@
 """OpenAI / Azure OpenAI `EmailAnalysisAgent`: strict structured outputs and strict proposal tools.
 
-Errors are mapped to `AgentProviderError` (transient: connection, timeout, rate limit, 5xx),
-`AgentOutputError` (refusal, truncation, content filter, schema-invalid output) or `AgentError`
-(authentication, bad request, configuration). Error messages never contain email content.
+Errors are mapped to `AgentProviderError` (transient: connection, timeout, rate limit, 5xx, or a response that
+is not a chat completion), `AgentOutputError` (refusal, truncation, content filter, schema-invalid output) or
+`AgentError` with failure category `authorization` (rejected credentials) or `configuration` (other 4xx, SDK
+misconfiguration). Error messages never contain email content or provider response text.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from app.agents.base import (
 from app.agents.tools import collect_tool_calls, completed_action_types, offered_tools
 from app.core.config import LLMProvider, Settings
 from app.core.errors import ConfigurationError
+from app.domain.enums import FailureCategory
 from app.observability.logging import get_logger
 from app.observability.tracing import start_span
 from app.schemas.ai import ClassificationOutput, ExtractionOutput, PlannedToolCall, PlanningContext
@@ -44,6 +46,7 @@ AZURE_COGNITIVE_SERVICES_SCOPE = "https://cognitiveservices.azure.com/.default"
 MAX_COMPLETION_TOKENS: dict[str, int] = {"classify": 4096, "extract": 8192, "plan": 8192}
 _SEMCONV_PROVIDER = {LLMProvider.OPENAI: "openai", LLMProvider.AZURE_OPENAI: "azure.ai.openai"}
 _SAFE_CODE_RE = re.compile(r"[^a-z0-9_]")
+_MALFORMED_RESPONSE = "The model provider returned a response that is not a valid chat completion."
 
 
 def _safe_code(value: object) -> str:
@@ -74,16 +77,27 @@ def map_provider_error(exc: Exception) -> AgentError | None:
         if isinstance(exc, openai.BadRequestError) and code in {"content_filter", "content_policy_violation"}:
             return AgentOutputError("The provider content filter blocked the request.")
         if isinstance(exc, openai.AuthenticationError | openai.PermissionDeniedError):
-            return AgentError(f"The model provider rejected the credentials (HTTP {status}).")
-        return AgentError(f"The model provider rejected the request (HTTP {status}{', ' + code if code else ''}).")
-    if isinstance(exc, openai.OpenAIError):
-        return AgentError(f"The model provider call failed ({type(exc).__name__}).")
+            return AgentError(
+                f"The model provider rejected the credentials (HTTP {status}).", category=FailureCategory.AUTHORIZATION
+            )
+        # Unknown model or deployment, unsupported parameter, API version...: the request as configured is wrong.
+        return AgentError(
+            f"The model provider rejected the request (HTTP {status}{', ' + code if code else ''}).",
+            category=FailureCategory.CONFIGURATION,
+        )
+    if isinstance(exc, openai.APIResponseValidationError):
+        return AgentError(f"The model provider call failed ({type(exc).__name__}).")  # malformed response
+    if isinstance(exc, openai.OpenAIError):  # raised by the SDK before any request, e.g. a missing key
+        return AgentError(
+            f"The model provider call failed ({type(exc).__name__}).", category=FailureCategory.CONFIGURATION
+        )
     return None
 
 
 def _strict_tool(name: str, model: type[BaseModel]) -> ChatCompletionFunctionToolParam:
-    # Built with pydantic_function_tool (strict schema) but sent as a plain strict definition, so arguments
-    # are validated per call by `collect_tool_calls`; one invalid call then cannot fail the whole response.
+    # Built with pydantic_function_tool (strict schema) but sent as a plain strict definition through `create`
+    # (not `parse`, which json-loads the arguments of every strict tool call and fails the whole response on one
+    # malformed call): arguments are validated per call by `collect_tool_calls`, which rejects only that call.
     function = openai.pydantic_function_tool(model, name=name)["function"]
     return {
         "type": "function",
@@ -269,6 +283,29 @@ class OpenAIAnalysisAgent:
 
     # -- internals --------------------------------------------------------------------------------
 
+    async def _send(self, request: dict[str, Any]) -> Any:
+        """Call the provider and turn its HTTP response into a completion.
+
+        Structured-output steps use `parse` (the SDK validates the content against the response model); the plan
+        step uses `create`, so each tool call's arguments are validated individually by `collect_tool_calls`.
+        The HTTP exchange (retries, status errors) and the processing of the response body are separated: errors
+        from the exchange propagate as they are (SDK errors are mapped by `map_provider_error`, anything else is a
+        programming error), while a body the SDK cannot process (e.g. an HTML page from a proxy with status 200)
+        is the provider's failure, not the model's and not ours.
+        """
+        raw_api = self._client.chat.completions.with_raw_response
+        send = raw_api.parse if "response_format" in request else raw_api.create
+        response = await send(**request)
+        try:
+            completion = response.parse()
+        except openai.OpenAIError, ValidationError, json.JSONDecodeError:
+            raise  # finish-reason, schema and JSON errors: mapped by `map_provider_error`
+        except Exception as exc:
+            raise AgentProviderError(_MALFORMED_RESPONSE) from exc
+        if isinstance(completion, str | bytes):  # `create` returns a non-JSON body as text instead of failing
+            raise AgentProviderError(_MALFORMED_RESPONSE)
+        return completion
+
     def _usage(self, completion: Any, latency_ms: int) -> LLMUsage:
         usage = getattr(completion, "usage", None)
         input_tokens = getattr(usage, "prompt_tokens", None)
@@ -322,7 +359,7 @@ class OpenAIAnalysisAgent:
         usage: LLMUsage | None = None
         with start_span("gen_ai.chat", attributes) as span:
             try:
-                completion = await self._client.chat.completions.parse(**request)
+                completion = await self._send(request)
                 usage = self._usage(completion, int((time.perf_counter() - started) * 1000))
                 span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens or 0)
                 span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens or 0)

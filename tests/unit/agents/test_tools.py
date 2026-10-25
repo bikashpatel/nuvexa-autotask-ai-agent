@@ -9,6 +9,7 @@ import pytest
 
 from app.agents.tools import (
     MAX_TOOL_CALLS,
+    OVERFLOW_TOOL_NAME,
     collect_tool_calls,
     completed_action_types,
     offered_tools,
@@ -162,11 +163,25 @@ def test_tool_outside_the_known_literal_set_is_rejected_even_if_offered() -> Non
 
 
 def test_collect_caps_the_number_of_calls() -> None:
+    # Regression (Prompt 5): calls beyond the cap collapse into one summary record (was one record per call).
     calls: list[tuple[str, object]] = [("propose_email_reply", REPLY)] + [("junk", {})] * (MAX_TOOL_CALLS + 2)
     accepted, rejected = collect_tool_calls(calls, offered_tools(context()))
     assert [c.tool_name for c in accepted] == ["propose_email_reply"]
-    assert [r["reason"] for r in rejected].count("too many tool calls") == 3
-    assert len(rejected) == MAX_TOOL_CALLS + 2
+    assert rejected[-1] == {"tool_name": OVERFLOW_TOOL_NAME, "reason": "too many tool calls (3 more ignored)"}
+    assert len(rejected) == MAX_TOOL_CALLS  # 5 unknown tools within the cap + the summary
+
+
+def test_collect_is_bounded_however_many_calls_the_model_makes() -> None:
+    flood: list[tuple[str, object]] = [("propose_email_reply", REPLY)] + [(f"exfiltrate_{i}", {}) for i in range(5_000)]
+    accepted, rejected = collect_tool_calls(flood, offered_tools(context()))
+    assert len(accepted) + len(rejected) == MAX_TOOL_CALLS + 1
+    assert rejected[-1]["reason"] == f"too many tool calls ({5_001 - MAX_TOOL_CALLS} more ignored)"
+
+
+def test_exactly_the_cap_produces_no_overflow_record() -> None:
+    calls: list[tuple[str, object]] = [("junk", {})] * MAX_TOOL_CALLS
+    _, rejected = collect_tool_calls(calls, offered_tools(context()))
+    assert [r["tool_name"] for r in rejected] == ["junk"] * MAX_TOOL_CALLS
 
 
 def test_collect_dedupes_skips_completed_and_resolves_no_action_conflicts() -> None:
