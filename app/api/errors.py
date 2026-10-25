@@ -33,7 +33,9 @@ def register_error_handlers(app: FastAPI) -> None:
             # Not `code=`: the log redaction masks every key named `code` (OAuth authorization codes).
             log.error("app_error", error_code=exc.code, error=exc.message)
         message = exc.message if exc.status_code < 500 or exc.code != "internal_error" else exc.public_message
-        return JSONResponse(status_code=exc.status_code, content=_body(exc.code, message, exc.details))
+        return JSONResponse(
+            status_code=exc.status_code, content=_body(exc.code, message, exc.details), headers=exc.headers or None
+        )
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_request: Request, exc: RequestValidationError) -> JSONResponse:

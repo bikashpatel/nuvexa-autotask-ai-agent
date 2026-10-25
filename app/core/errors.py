@@ -13,6 +13,7 @@ class AppError(Exception):
     def __init__(self, message: str | None = None, *, details: list[dict[str, Any]] | None = None) -> None:
         self.message = message or self.public_message
         self.details = details or []
+        self.headers: dict[str, str] = {}  # extra response headers (e.g. Retry-After)
         super().__init__(self.message)
 
 
@@ -72,6 +73,11 @@ class RateLimited(AppError):
     status_code = 429
     code = "rate_limited"
     public_message = "Too many requests. Try again later."
+
+    def __init__(self, message: str | None = None, *, retry_after: int | None = None) -> None:
+        super().__init__(message)
+        if retry_after is not None:  # whole seconds (RFC 9110 delay-seconds), never 0: "retry now" would be wrong
+            self.headers["Retry-After"] = str(max(1, retry_after))
 
 
 class IntegrationError(AppError):

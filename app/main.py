@@ -19,14 +19,39 @@ from app.api.middleware import (
     SlidingWindowRateLimiter,
 )
 from app.api.routes import actions, auth, emails, health, integrations, misc, workflows
-from app.core.config import Settings, get_settings
+from app.core.config import RateLimitBackend, Settings, get_settings
 from app.db.session import Database
 from app.observability.logging import configure_logging, get_logger
 from app.observability.tracing import configure_tracing, instrument_app
 from app.services.audit import configure_audit_signing
+from app.services.rate_limit import DatabaseRateLimiter, RateLimiter
 
 API_PREFIX = "/api/v1"
 log = get_logger(__name__)
+
+
+def build_rate_limiter(settings: Settings, db: Database) -> RateLimiter:
+    """RATE_LIMIT_BACKEND: per-process sliding window (default) or counters shared through the database."""
+    if settings.rate_limit_backend is RateLimitBackend.DATABASE:
+        # Bucket digests are keyed with AUDIT_HMAC_KEY (required in production, identical on every replica).
+        key = settings.audit_hmac_key.get_secret_value().encode() if settings.audit_hmac_key else None
+        return DatabaseRateLimiter(db.engine, secret=key)
+    return SlidingWindowRateLimiter()
+
+
+def _warn_if_rate_limits_are_per_process(settings: Settings) -> None:
+    # The replica count is not knowable from inside the process, and one replica is a valid production setup, so
+    # this warns instead of refusing to start.
+    if (
+        settings.is_production
+        and settings.rate_limit_enabled
+        and settings.rate_limit_backend is RateLimitBackend.MEMORY
+    ):
+        log.warning(
+            "rate_limits_are_per_process",
+            hint="With more than one API replica set RATE_LIMIT_BACKEND=database (or enforce limits at the gateway); "
+            "otherwise every limit is multiplied by the number of replicas.",
+        )
 
 
 def create_app(settings: Settings | None = None, database: Database | None = None) -> FastAPI:
@@ -63,7 +88,9 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
             demo_mode=settings.demo_mode,
             llm_provider=settings.llm_provider.value,
             azure_devops_mode=settings.azure_devops_mode.value,
+            rate_limit_backend=settings.rate_limit_backend.value,
         )
+        _warn_if_rate_limits_are_per_process(settings)
         try:
             yield
         finally:
@@ -86,7 +113,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     )
     app.state.settings = settings
     app.state.db = db
-    app.state.rate_limiter = SlidingWindowRateLimiter()
+    app.state.rate_limiter = build_rate_limiter(settings, db)
 
     register_error_handlers(app)
     if settings.cors_allowed_origins:

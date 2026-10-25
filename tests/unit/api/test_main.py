@@ -10,12 +10,17 @@ from typing import Any
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
+from pydantic import SecretStr
+from sqlalchemy import func, select
 
 from app import main as main_module
 from app.api.middleware import SlidingWindowRateLimiter
-from app.core.config import Settings
+from app.core.config import AppEnv, RateLimitBackend, Settings
+from app.db.models import RateLimitCounter
 from app.db.session import Database
 from app.main import API_PREFIX, app_factory, create_app
+from app.services.rate_limit import DatabaseRateLimiter
+from tests.support.rate_limit import RecordingLog
 
 EXPECTED_ROUTES = {
     ("GET", "/api/v1/health/live"),
@@ -73,6 +78,58 @@ def test_factory_wiring(settings: Settings, db: Database, no_side_effects: dict[
     names = [m.cls.__name__ for m in app.user_middleware]
     # Correlation id is outermost, so the guard's and the size limit's error envelopes carry it.
     assert names == ["CorrelationIdMiddleware", "ControlCharacterGuardMiddleware", "RequestSizeLimitMiddleware"]
+
+
+async def test_database_rate_limit_backend_wiring(settings: Settings, db: Database, no_side_effects: Any) -> None:
+    audit_key = "k" * 32
+    cfg = settings.model_copy(
+        update={"rate_limit_backend": RateLimitBackend.DATABASE, "audit_hmac_key": SecretStr(audit_key)}
+    )
+    app = create_app(cfg, db)
+
+    limiter = app.state.rate_limiter
+    assert isinstance(limiter, DatabaseRateLimiter)
+    # Bucket digests are keyed with AUDIT_HMAC_KEY, which every replica shares.
+    assert limiter.digest("auth:ip:192.0.2.1", 60) == DatabaseRateLimiter(db.engine, secret=audit_key.encode()).digest(
+        "auth:ip:192.0.2.1", 60
+    )
+    assert (await limiter.acquire("auth:ip:192.0.2.1", 1, 60)).allowed
+    async with db.session() as s:  # counted in the application database
+        assert (await s.execute(select(func.count()).select_from(RateLimitCounter))).scalar_one() == 1
+
+
+@pytest.mark.parametrize(
+    ("env", "backend", "enabled", "warned"),
+    [
+        (AppEnv.PRODUCTION, RateLimitBackend.MEMORY, True, True),
+        (AppEnv.PRODUCTION, RateLimitBackend.DATABASE, True, False),
+        (AppEnv.PRODUCTION, RateLimitBackend.MEMORY, False, False),
+        (AppEnv.DEVELOPMENT, RateLimitBackend.MEMORY, True, False),
+    ],
+)
+async def test_production_startup_warns_when_rate_limits_are_per_process(
+    settings: Settings,
+    db: Database,
+    no_side_effects: Any,
+    env: AppEnv,
+    backend: RateLimitBackend,
+    enabled: bool,
+    warned: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = RecordingLog()
+    monkeypatch.setattr(main_module, "log", log)
+    cfg = settings.model_copy(update={"app_env": env, "rate_limit_backend": backend, "rate_limit_enabled": enabled})
+    async with LifespanManager(create_app(cfg, db)):
+        pass
+
+    [started] = log.named("api_started")
+    assert started["rate_limit_backend"] == backend.value
+    warnings = log.named("rate_limits_are_per_process")
+    assert len(warnings) == (1 if warned else 0)
+    if warned:
+        assert warnings[0]["log_level"] == "warning"
+        assert "RATE_LIMIT_BACKEND=database" in warnings[0]["hint"]
 
 
 async def test_middleware_is_active(settings: Settings, db: Database, no_side_effects: Any) -> None:

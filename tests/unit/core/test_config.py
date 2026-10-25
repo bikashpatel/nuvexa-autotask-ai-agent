@@ -7,7 +7,15 @@ from typing import Any
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.core.config import AppEnv, AzureDevOpsMode, LLMProvider, Settings, _split_csv, get_settings
+from app.core.config import (
+    AppEnv,
+    AzureDevOpsMode,
+    LLMProvider,
+    RateLimitBackend,
+    Settings,
+    _split_csv,
+    get_settings,
+)
 from tests.conftest import TEST_FERNET_KEY
 
 AUDIT_KEY = "a" * 32
@@ -38,6 +46,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "CORS_ALLOWED_ORIGINS",
         "DEMO_MODE",
         "DATABASE_URL",
+        "RATE_LIMIT_BACKEND",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -50,6 +59,21 @@ def test_defaults() -> None:
     assert s.cors_allowed_origins == []
     assert s.mail_poll_interval_seconds == 0
     assert s.is_production is False
+
+
+def test_rate_limits_default_to_the_in_process_backend() -> None:
+    assert build().rate_limit_backend is RateLimitBackend.MEMORY
+    assert build(**PROD).rate_limit_backend is RateLimitBackend.MEMORY  # opt-in, also in production
+
+
+def test_rate_limit_backend_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_BACKEND", "database")
+    assert build().rate_limit_backend is RateLimitBackend.DATABASE
+
+
+def test_unknown_rate_limit_backend_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="rate_limit_backend"):
+        build(rate_limit_backend="redis")
 
 
 # --------------------------------------------------------------------------- CSV parsing

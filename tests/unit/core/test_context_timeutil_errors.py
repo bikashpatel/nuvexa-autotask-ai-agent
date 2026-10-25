@@ -108,6 +108,17 @@ def test_error_classes(cls: type[errors.AppError], status: int, code: str) -> No
     assert exc.details == []
 
 
+def test_errors_carry_no_response_headers_by_default() -> None:
+    assert errors.AppError().headers == {}
+    assert errors.NotFound().headers == {}
+    assert errors.RateLimited().headers == {}
+
+
+@pytest.mark.parametrize(("retry_after", "header"), [(1, "1"), (51, "51"), (0, "1"), (-4, "1")])
+def test_rate_limited_sets_a_retry_after_of_at_least_one_second(retry_after: int, header: str) -> None:
+    assert errors.RateLimited(retry_after=retry_after).headers == {"Retry-After": header}
+
+
 def test_error_custom_message_and_details() -> None:
     exc = errors.Conflict("custom", details=[{"msg": "x"}])
     assert exc.message == "custom"

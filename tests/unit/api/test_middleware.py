@@ -22,6 +22,7 @@ from app.api.middleware import (
     client_ip,
 )
 from app.core.context import get_correlation_id
+from app.services.rate_limit import RateLimitDecision
 
 Message = dict[str, Any]
 App = Callable[
@@ -385,6 +386,29 @@ def test_sliding_window(clock: list[float]) -> None:
     assert not limiter.allow("k", 2, 10)
     clock[0] = 1100.0
     assert limiter.allow("k", 2, 10)
+
+
+async def test_sliding_window_reports_when_the_oldest_hit_expires(clock: list[float]) -> None:
+    limiter = SlidingWindowRateLimiter()
+    assert (await limiter.acquire("k", 2, 10)) == RateLimitDecision(allowed=True)
+    clock[0] += 1
+    assert (await limiter.acquire("k", 2, 10)).allowed
+    clock[0] += 1.5
+    # the hit at 1000 expires once it is *more* than 10 s old: 7.5 s from now → 8 whole seconds
+    assert (await limiter.acquire("k", 2, 10)) == RateLimitDecision(allowed=False, retry_after=8)
+    clock[0] = 1010.0
+    assert (await limiter.acquire("k", 2, 10)) == RateLimitDecision(allowed=False, retry_after=1)
+    clock[0] = 1010.5
+    assert (await limiter.acquire("k", 2, 10)).allowed
+
+
+def test_retry_after_for_a_bucket_filled_under_a_larger_limit(clock: list[float]) -> None:
+    limiter = SlidingWindowRateLimiter()
+    for _ in range(3):
+        assert limiter.check("k", 3, 10).allowed
+        clock[0] += 1
+    # 3 hits (1000, 1001, 1002) against a limit of 2 at 1003: two must expire, the second one after 1011 → 9 s
+    assert limiter.check("k", 2, 10) == RateLimitDecision(allowed=False, retry_after=9)
 
 
 def test_denied_requests_do_not_extend_the_window(clock: list[float]) -> None:

@@ -38,6 +38,11 @@ class MailMode(StrEnum):
     GRAPH = "graph"  # Microsoft Graph (demo mailbox still available when DEMO_MODE=true)
 
 
+class RateLimitBackend(StrEnum):
+    MEMORY = "memory"  # in-process sliding window: exact, but per API replica (limits multiply with replicas)
+    DATABASE = "database"  # counters in the application database, shared by every replica (app.services.rate_limit)
+
+
 def _split_csv(value: object) -> object:
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
@@ -88,6 +93,8 @@ class Settings(BaseSettings):
     cors_allowed_origins: CsvList = Field(default_factory=list)
     max_request_bytes: int = Field(default=1_048_576, ge=1024)
     rate_limit_enabled: bool = True
+    # `database` is required for more than one API replica (or a shared limit at the gateway); docs/deployment.md.
+    rate_limit_backend: RateLimitBackend = RateLimitBackend.MEMORY
     # Comma-separated Fernet keys; first key encrypts, all keys decrypt (rotation).
     token_encryption_keys: SecretStr | None = None
     # HMAC key for tamper-evident audit events (≥ 32 bytes). Required in production.
