@@ -168,6 +168,8 @@ reconcile later.
 | Symptom | Cause / fix |
 |---|---|
 | `agent_output_error` (502), failure category `llm_output` | Refusal, truncated or schema-invalid structured output. Not retried automatically. Use a model/deployment that supports strict structured outputs and function calling; on Azure use a recent GA `AZURE_OPENAI_API_VERSION`; very long emails are truncated at `LLM_MAX_EMAIL_CHARS`. Content filters can refuse some emails — handle those manually or re-analyze |
+| Category `authorization` on an LLM step | The provider rejected the credentials (HTTP 401/403): check `OPENAI_API_KEY` / `AZURE_OPENAI_API_KEY` or the managed identity's role on the Azure OpenAI resource. Not retried |
+| Category `configuration` on an LLM step | Another 4xx (wrong deployment/model name, API version, endpoint): fix the settings. Not retried |
 | `agent_provider_error`, category `llm_provider` | Network, `429` or `5xx` from the provider; retried at job level (`LLM_MAX_RETRIES`, `JOB_MAX_ATTEMPTS`). Check quota, endpoint, `LLM_TIMEOUT_SECONDS` |
 | `401` from Azure OpenAI with `AZURE_OPENAI_USE_ENTRA_ID=true` | Identity lacks **Cognitive Services OpenAI User**; with a user-assigned identity set `AZURE_CLIENT_ID`; locally run `az login` |
 | `temperature` rejected | Leave `LLM_TEMPERATURE` unset (it is then omitted) |

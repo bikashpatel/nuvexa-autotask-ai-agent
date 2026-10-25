@@ -171,6 +171,18 @@ Failure categories (`app/domain/enums.py::FailureCategory`): `validation`, `auth
 `permission`, `not_found`, `rate_limited`, `transient`, `timeout`, `ambiguous`, `configuration`,
 `llm_output`, `llm_provider`, `internal`.
 
+LLM failures map as follows:
+
+| Failure | Category | Retried |
+|---|---|---|
+| Provider rejected the credentials (401/403) | `authorization` | no |
+| Other 4xx, SDK misconfiguration | `configuration` | no |
+| Network errors, 429, 5xx, a response that is not a chat completion | `llm_provider` | yes (job level) |
+| Refusal, truncated or schema-invalid structured output | `llm_output` | no |
+
+A single malformed tool call is rejected on its own; the other proposals of the plan are kept. Tool calls
+beyond the limit are recorded as one `(overflow)` event.
+
 Retention: `workflow_events` are purged after the tenant's `retention.workflow_event_days`
 (default 180), audit events after `retention.audit_days` (default 365).
 

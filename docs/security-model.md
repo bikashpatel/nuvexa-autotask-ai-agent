@@ -41,6 +41,17 @@ LLM output crosses the boundary only after Pydantic validation **and** policy va
   instructions", "you are now", "approve this automatically", "reveal your system prompt",
   role-tag spoofing and encoded payloads. Flags are stored, shown to the reviewer, and reduce
   confidence. They never *grant* anything.
+  * It screens the subject, body, sender and recipient names/addresses and attachment names, matching on
+    text with Unicode default-ignorable characters removed (variation selectors, joiners, tag characters
+    cannot split a phrase).
+  * Invisible-character tricks (bidi overrides, tag-character smuggling, runs of zero-width characters)
+    are removed at ingestion but leave a visible `[hidden characters removed]` marker in the stored
+    subject, body, names and attachment names, which the screener reports as `hidden_text`.
+  * Every pattern runs in linear time (regression tests at the 200,000-character screening limit), so a
+    crafted email cannot stall a worker.
+  * Limitation: English phrasing only (see the strict xfails in `tests/unit/agents/test_injection_corpus.py`).
+* Proposed tags starting with `nuvexa-` are reserved for the system's idempotency tag: the model cannot
+  propose one, so a work item cannot be made to look like another action's write during reconciliation.
 * The planner may only call 4 registered proposal tools with strict schemas. Organization, project
   defaults, area/iteration path allow-lists, field allow-list and API endpoints come from
   configuration, not from the model. Unknown fields or projects are rejected.
@@ -110,6 +121,11 @@ LLM output crosses the boundary only after Pydantic validation **and** policy va
 * Upstream error text is not trusted: Azure DevOps errors are reduced to stable identifiers (`TFnnnnnn`,
   exception type, field reference) before they are stored, returned or logged, because providers can
   echo credentials back.
+* Tracebacks are rendered before redaction, redacted and capped at 16 KiB. Value redaction also covers
+  `Basic …` credentials, `sk-…` API keys and Azure DevOps PAT shapes. HTTP-client request logging
+  (`httpx`, `httpx2`, `httpcore2`) is at WARNING, so request URLs are not logged.
+* An unexpected exception in an analysis step is re-raised with a fixed message ("Analysis step '<step>'
+  failed (<Type>)…"), so its text never reaches LangGraph checkpoint writes.
 * Email bodies are not logged (`LOG_EMAIL_CONTENT=false` default). Spans carry IDs, sizes,
   categories and token counts — not content.
 * No chain-of-thought is requested or stored. Only concise rationales and evidence references.
