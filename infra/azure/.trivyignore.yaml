@@ -1,0 +1,13 @@
+# Trivy ignore file for `trivy config`, passed to Trivy by `scripts/security-scan.sh config`.
+# Every entry is an accepted exception registered in security-exceptions.toml; keep each one limited to one check and
+# one path, with the same expiry as its register entry.
+misconfigurations:
+  - id: AZU-0013
+    paths:
+      - "infra/azure/main.json"
+    statement: >-
+      SEC-EX-007: false positive. Trivy's ARM adapter reads properties.properties.networkAcls.defaultAction, a path
+      that cannot exist in a valid template, so AZU-0013 fails for every Key Vault. The vault in main.json sets
+      networkAcls.defaultAction=Deny, bypass=None and publicNetworkAccess=Disabled, asserted by
+      tests/security/test_infrastructure_as_code.py.
+    expired_at: 2027-04-30

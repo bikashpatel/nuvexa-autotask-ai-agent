@@ -72,3 +72,14 @@ justification = "The quoted value is a synthetic test fixture (the hex digits in
 compensating_controls = "the allowlist matches only that commit; tests/security/test_supply_chain_configuration.py requires full commit SHAs and that the pinned text no longer exists in the current tree; every other commit and file is scanned with the full default rules"
 expires = 2027-10-31
 
+
+[[exception]]
+id = "SEC-EX-007"
+scanner = "trivy config"
+rule = "AZU-0013 Key vault should have the network acl block specified (false positive)"
+scope = "infra/azure/main.json (the generated ARM template), the one Key Vault resource"
+mechanism = "infra/azure/.trivyignore.yaml entry limited to check AZU-0013 and the path infra/azure/main.json (with expired_at), passed to trivy config with --ignorefile in scripts/security-scan.sh"
+owner = "Platform owner (Elarxsys)"
+justification = "Trivy's ARM Key Vault adapter (0.76.0, unchanged on main) reads properties.properties.networkAcls.defaultAction, a path no valid template has, so AZU-0013 fails for every Key Vault however its firewall is configured; the vault in main.json sets networkAcls.defaultAction = Deny, bypass = None and publicNetworkAccess = Disabled"
+compensating_controls = "tests/security/test_infrastructure_as_code.py asserts the vault's networkAcls (Deny, no bypass), disabled public network access, the private endpoint, RBAC authorization and purge protection on the evaluated template; every other Trivy check still gates main.json, and AZU-0013 still gates every other file; drop the entry once Trivy reads properties.networkAcls"
+expires = 2027-04-30
