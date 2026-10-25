@@ -118,13 +118,13 @@ both images rebuilt from it:
 | pip-audit 2.10.1, every locked Python package (all groups, hashes required) | no known vulnerabilities |
 | npm audit (fails on high/critical; all listed) | 0 vulnerabilities |
 | npm registry signatures | 294 packages verified, 123 with attestations |
-| gitleaks v8.30.1, full history (30 commits) | **1 finding on the first run**: a synthetic redaction fixture added in this review (`"api-key: 0123456789abcdef"` in `tests/unit/observability/test_logging.py`). It is not a credential; it is now allowlisted by rule + file + exact line under SEC-EX-005, and a key planted elsewhere in the same file is still reported (negative control). Re-run: **no leaks**, 30/30 commits |
+| gitleaks v8.30.1, full history | **1 finding on the first local run**: a synthetic redaction fixture added in this review (an `api-key` test value made of the hex digits in order, in `tests/unit/observability/test_logging.py`). It is not a credential; it is allowlisted by rule + file + exact line under SEC-EX-005, and a key planted elsewhere in the same file is still reported (negative control). **CI then flagged this report itself** (commit `ee6503f` quoted the value): reworded, and that one historical commit is allowlisted by commit + file + exact line (SEC-EX-006). Final scan: **no leaks** |
 | semgrep 1.181.0 (Python, TypeScript/React, OWASP Top 10, Dockerfile, GitHub Actions, secrets; 315 rules, 290 files) | 0 findings (the two cited `inSource` suppressions stay visible in SARIF) |
 | bandit 1.9.4 (all severities) | no issues |
 | Trivy 0.76.0, backend image | **0 fixable** HIGH/CRITICAL; without a published fix: 44 HIGH, 58 MEDIUM, 61 LOW, 1 UNKNOWN (SEC-EX-001); no secrets |
 | Trivy 0.76.0, frontend image | 0 findings |
 | Trivy config, actionlint 1.7.12, zizmor 1.31.1 | clean |
-| Exception register | 9 cited suppressions, 5 registered exceptions, none expired (SEC-EX-004 expiry warning: 2026-11-02) |
+| Exception register | 10 cited suppressions, 6 registered exceptions, none expired (SEC-EX-004 expiry warning: 2026-11-02) |
 | SBOMs | CycloneDX for the Python runtime and all groups, npm runtime and both images |
 
 Static checks: ruff (lint and format) and strict mypy are clean; ESLint (`--max-warnings=0`), Prettier and
@@ -185,7 +185,8 @@ Defects found in earlier phases (Prompt 1, F-01…F-25) are in [SECURITY_AUDIT.m
 | SEC-EX-002 | bandit B608 / ruff S608 false positive on the WIQL query | 2027-10-31 |
 | SEC-EX-003 | semgrep `unverified-jwt-decode`: tenant pre-read before full verification | 2027-10-31 |
 | SEC-EX-004 | semgrep uv dependency cooldown deferred (would force 27 downgrades) | **2026-11-02** — enable `exclude-newer = "7 days"` |
-| SEC-EX-005 | gitleaks: four synthetic test fixtures, allowlisted by rule + file + exact line | 2027-10-31 |
+| SEC-EX-005 | gitleaks: five synthetic test fixtures, allowlisted by rule + file + exact line | 2027-10-31 |
+| SEC-EX-006 | gitleaks: one historical commit of this report that quoted a SEC-EX-005 fixture (commit-pinned) | 2027-10-31 |
 
 ### Unresolved risks
 

@@ -189,4 +189,20 @@ def test_secret_scan_allowlists_are_precise() -> None:
             assert anchored.startswith("^"), f"{label}: anchor {pattern!r}"
             assert anchored.endswith("$"), f"{label}: anchor {pattern!r}"
             assert ".*" not in pattern, f"{label}: no wildcards in {pattern!r}"
-        assert all(p.startswith("^tests/") for p in allowlist["paths"]), "only test fixtures may be allowlisted"
+        pinned = allowlist.get("commits", [])
+        assert all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in pinned), f"{label}: pin full commit SHAs"
+        if not all(p.startswith("^tests/") for p in allowlist["paths"]):
+            # Outside test fixtures only for specific historical commits whose text has since been changed.
+            assert pinned, f"{label}: only test fixtures may be allowlisted (or specific historical commits)"
+
+
+def test_commit_pinned_secret_allowlists_cover_history_only() -> None:
+    # An allowlist pinned to old commits must not also hide the same text in the current tree.
+    config = tomllib.loads((ROOT / ".gitleaks.toml").read_text())
+    pinned = [a for a in config.get("allowlists", []) if a.get("commits")]
+    for allowlist in pinned:
+        for path_pattern in allowlist["paths"]:
+            path = ROOT / path_pattern.removeprefix("^").removesuffix("$").replace("\\.", ".")
+            current = path.read_text() if path.is_file() else ""
+            for pattern in allowlist["regexes"]:
+                assert not re.search(pattern, current), f"{allowlist['description']}: still matches {path.name}"

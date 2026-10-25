@@ -60,3 +60,15 @@ owner = "QA lead (Elarxsys)"
 justification = "Synthetic values that exercise redaction and idempotency; they authenticate nothing and they exist in git history, so they cannot simply be deleted"
 compensating_controls = "every other line in those files, and every other file and commit, is still scanned with the full default rules; tests/security/test_supply_chain_configuration.py rejects imprecise allowlists"
 expires = 2027-10-31
+
+[[exception]]
+id = "SEC-EX-006"
+scanner = "gitleaks"
+rule = "generic-api-key"
+scope = "docs/RELEASE_READINESS_REPORT.md in commit ee6503f only (history): the report quoted the SEC-EX-005 redaction fixture"
+mechanism = ".gitleaks.toml allowlist pinned to that commit, file and exact line (condition AND); the current text no longer contains the value"
+owner = "QA lead (Elarxsys)"
+justification = "The quoted value is a synthetic test fixture (the hex digits in order), not a credential; the commit is on the published main branch, so it cannot be removed without rewriting shared history"
+compensating_controls = "the allowlist matches only that commit; tests/security/test_supply_chain_configuration.py requires full commit SHAs and that the pinned text no longer exists in the current tree; every other commit and file is scanned with the full default rules"
+expires = 2027-10-31
+

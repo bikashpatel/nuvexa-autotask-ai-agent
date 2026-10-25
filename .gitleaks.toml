@@ -1,5 +1,5 @@
 # gitleaks configuration: the maintained default rules plus five precise allowlists for synthetic test
-# fixtures (security-exceptions.toml SEC-EX-005). Each allowlist matches one rule, one file and one exact
+# fixtures (security-exceptions.toml SEC-EX-005) and one for a single historical commit (SEC-EX-006). Each allowlist matches one rule, one file and one exact
 # line (condition AND), so a real secret anywhere else — including elsewhere in these files — is reported.
 # Line regexes use (?m) because gitleaks matches them against the finding's line within its diff fragment
 # (history scans prefix added lines with '+').
@@ -47,3 +47,12 @@ condition = "AND"
 paths = ['''^tests/unit/observability/test_logging\.py$''']
 regexTarget = "line"
 regexes = ['''(?m)^\+?        \("api-key: 0123456789abcdef", f"api-key: \{REDACTED\}"\),$''']
+
+[[allowlists]]
+description = "SEC-EX-006: commit ee6503f of the release report quoted the SEC-EX-005 redaction fixture; reworded in the next commit (history only)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+commits = ["ee6503f576efbd2c1c9044cba10ddf433f8de34a"]
+paths = ['''^docs/RELEASE_READINESS_REPORT\.md$''']
+regexTarget = "line"
+regexes = ['''(?m)^\+?\| gitleaks v8\.30\.1, full history \(30 commits\) \| \*\*1 finding on the first run\*\*: a synthetic redaction fixture added in this review \(`"api-key: 0123456789[a]bcdef"` in `tests/unit/observability/test_logging\.py`\)\. It is not a credential; it is now allowlisted by rule \+ file \+ exact line under SEC-EX-005, and a key planted elsewhere in the same file is still reported \(negative control\)\. Re-run: \*\*no leaks\*\*, 30/30 commits \|$''']
