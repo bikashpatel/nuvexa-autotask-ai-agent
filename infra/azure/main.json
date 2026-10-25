@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.48.1.52935",
-      "templateHash": "2305062338328271404"
+      "templateHash": "18128766256420874063"
     }
   },
   "parameters": {
@@ -493,6 +493,13 @@
       "defaultValue": "[parameters('containerAppsSubnetPrefix')]",
       "metadata": {
         "description": "FORWARDED_ALLOW_IPS for the api: proxies whose X-Forwarded-* headers uvicorn trusts (the infrastructure subnet)."
+      }
+    },
+    "frontendRealIpFrom": {
+      "type": "string",
+      "defaultValue": "[parameters('containerAppsSubnetPrefix')]",
+      "metadata": {
+        "description": "NGINX_REAL_IP_FROM for the frontend: the proxy (CIDR) whose X-Forwarded-For nginx trusts for the client address (the infrastructure subnet, where the ingress runs)."
       }
     },
     "migrateReplicaTimeoutSeconds": {
@@ -1305,6 +1312,10 @@
                 {
                   "name": "API_UPSTREAM",
                   "value": "[format('http://{0}', parameters('apiAppName'))]"
+                },
+                {
+                  "name": "NGINX_REAL_IP_FROM",
+                  "value": "[parameters('frontendRealIpFrom')]"
                 }
               ]
             }

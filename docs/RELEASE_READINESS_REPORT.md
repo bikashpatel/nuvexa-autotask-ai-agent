@@ -223,6 +223,7 @@ Defects found in earlier phases (Prompt 1, F-01…F-25) are in [SECURITY_AUDIT.m
 | SEC-EX-004 | semgrep uv dependency cooldown deferred (would force 27 downgrades) | **2026-11-02** — enable `exclude-newer = "7 days"` |
 | SEC-EX-005 | gitleaks: five synthetic test fixtures, allowlisted by rule + file + exact line | 2027-10-31 |
 | SEC-EX-006 | gitleaks: one historical commit of this report that quoted a SEC-EX-005 fixture (commit-pinned) | 2027-10-31 |
+| SEC-EX-007 | Trivy config AZU-0013 false positive on the generated Azure ARM template's Key Vault | 2027-04-30 |
 
 ### Unresolved risks
 

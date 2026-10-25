@@ -287,6 +287,9 @@ param workerTerminationGracePeriodSeconds int = 60
 @description('FORWARDED_ALLOW_IPS for the api: proxies whose X-Forwarded-* headers uvicorn trusts (the infrastructure subnet).')
 param apiForwardedAllowIps string = containerAppsSubnetPrefix
 
+@description('NGINX_REAL_IP_FROM for the frontend: the proxy (CIDR) whose X-Forwarded-For nginx trusts for the client address (the infrastructure subnet, where the ingress runs).')
+param frontendRealIpFrom string = containerAppsSubnetPrefix
+
 @description('Maximum run time of one migration attempt (seconds).')
 @minValue(60)
 param migrateReplicaTimeoutSeconds int = 900
@@ -1206,6 +1209,8 @@ resource frontend 'Microsoft.App/containerApps@2026-01-01' = if (stage == 'apps'
           env: [
             // Internal ingress by app name: port 80 -> target port 8000 (frontend/nginx.conf).
             { name: 'API_UPSTREAM', value: 'http://${apiAppName}' }
+            // The ingress is the TCP peer; nginx takes the client address from its X-Forwarded-For.
+            { name: 'NGINX_REAL_IP_FROM', value: frontendRealIpFrom }
           ]
         }
       ]

@@ -23,7 +23,7 @@ and `e2e` only on request.
 | `secret-scan` | 10 gitleaks over every commit | any leak; a scan that saw fewer commits than HEAD has |
 | `sast` | 11 semgrep (Python, TypeScript/React, OWASP Top 10, Dockerfile, GitHub Actions, secrets) + bandit | any semgrep finding (`--error`); any bandit finding at any severity |
 | `containers` | 12 image builds (never pushed) · 13 Trivy vulnerability + secret scan · 15 image SBOMs and metadata | any HIGH/CRITICAL vulnerability with a published fix; any secret in an image |
-| `pipeline-config` | 13 Trivy misconfiguration scan · actionlint · zizmor · exception register | any misconfiguration (LOW and above); any workflow lint or workflow-security finding; an unregistered, unknown, uncited or expired exception |
+| `pipeline-config` | 13 Trivy misconfiguration scan (Dockerfiles, generated Azure ARM template) · Bicep lint and `infra/azure/main.json` in sync with `main.bicep` (pinned, checksum-verified Bicep CLI, offline) · actionlint · zizmor · exception register | any misconfiguration (LOW and above); any Bicep diagnostic or a stale `main.json`; any workflow lint or workflow-security finding; an unregistered, unknown, uncited or expired exception |
 | `e2e` (opt-in) | 14 system E2E: isolated Compose stack (nginx, API, worker, PostgreSQL), Playwright UI | any failure |
 | `ci-gate` | joins all of the above | any blocking result |
 
@@ -87,6 +87,7 @@ Trivy's full report includes the unfixed vulnerabilities that the gate skips.
 | SEC-EX-004 | semgrep `uv-missing-dependency-cooldown` (F-21) | `[tool.uv]`: a 7-day `exclude-newer` today would force 27 packages back, including FastAPI 0.162 → 0.143. Dependabot's cooldown applies meanwhile | Backend lead | **2026-11-02**: enable `exclude-newer = "7 days"` |
 | SEC-EX-005 | gitleaks `jwt`, `generic-api-key` | 5 synthetic test fixtures, each allowlisted by rule + file + exact line | QA lead | 2027-10-31 |
 | SEC-EX-006 | gitleaks `generic-api-key` | one historical commit (`ee6503f`) of the release report that quoted a SEC-EX-005 fixture; allowlisted by commit + file + exact line | QA lead | 2027-10-31 |
+| SEC-EX-007 | Trivy config AZU-0013 (false positive: its ARM Key Vault adapter reads a property path no valid template has) | `infra/azure/main.json` only; the vault sets `networkAcls` Deny, no bypass, public access disabled (asserted by `tests/security/test_infrastructure_as_code.py`) | Platform owner | 2027-04-30 |
 
 The owners are roles; assign named people before production. To add an exception:
 

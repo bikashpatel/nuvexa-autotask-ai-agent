@@ -21,7 +21,11 @@ FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 NGINX_CONF = FRONTEND / "nginx.conf"
 
 # Values the container entrypoint would substitute (Dockerfile ENV / 15-local-resolvers.envsh).
-TEMPLATE_VARIABLES = {"API_UPSTREAM": "http://api:8000", "NGINX_LOCAL_RESOLVERS": "127.0.0.11"}
+TEMPLATE_VARIABLES = {
+    "API_UPSTREAM": "http://api:8000",
+    "NGINX_LOCAL_RESOLVERS": "127.0.0.11",
+    "NGINX_REAL_IP_FROM": "127.0.0.1/32",
+}
 
 SECURITY_HEADERS = (
     "content-security-policy",
@@ -447,3 +451,21 @@ def test_hashed_assets_are_served_without_byte_ranges(server: Directive) -> None
     # Range request with the full 200, so neither 206 nor 416 can occur under /assets/.
     assets = _location(server, "/assets/")
     assert [d.args for d in _children(assets, "max_ranges")] == [["0"]]
+
+
+def test_the_client_address_is_taken_only_from_a_trusted_proxy(server: Directive) -> None:
+    # Behind an ingress (Azure Container Apps) the TCP peer is the proxy; without realip every request would carry
+    # the proxy's address, and per-IP sign-in limits would be shared by all users (one attacker locks out
+    # everyone). X-Forwarded-For is honoured only from NGINX_REAL_IP_FROM; the right-most untrusted entry wins.
+    assert [d.args for d in _children(server, "set_real_ip_from")] == [["127.0.0.1/32"]]  # rendered image default
+    assert "set_real_ip_from  ${NGINX_REAL_IP_FROM};" in NGINX_CONF.read_text(encoding="utf-8")
+    assert [d.args for d in _children(server, "real_ip_header")] == [["X-Forwarded-For"]]
+    assert [d.args for d in _children(server, "real_ip_recursive")] == [["on"]]
+
+
+def test_the_image_trusts_only_loopback_by_default_and_renders_the_variable() -> None:
+    dockerfile = (FRONTEND / "Dockerfile").read_text()
+    assert re.search(r"NGINX_REAL_IP_FROM=127\.0\.0\.1/32\b", dockerfile)  # no proxy in front: the peer is the client
+    envsubst = re.search(r"NGINX_ENVSUBST_FILTER=(\S+)", dockerfile)
+    assert envsubst is not None
+    assert "NGINX_REAL_IP_FROM" in envsubst.group(1)

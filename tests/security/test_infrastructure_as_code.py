@@ -838,3 +838,20 @@ def test_secure_parameters_have_no_defaults_and_come_from_the_environment() -> N
     assert not _template().get("outputs") or all(
         spec["type"].lower() not in ("securestring", "secureobject") for spec in _template()["outputs"].values()
     )
+
+
+def test_the_dashboard_trusts_client_addresses_only_from_the_ingress_subnet() -> None:
+    # nginx's realip module must trust the Container Apps ingress (infrastructure subnet), or every request reaches
+    # the api with the proxy's address and per-IP sign-in limits are shared by all users.
+    resources = _scenario()
+    subnets = _one(resources, "Microsoft.Network/virtualNetworks").properties["subnets"]
+    infrastructure = next(
+        s["properties"]["addressPrefix"]
+        for s in subnets
+        if [d["properties"]["serviceName"] for d in s["properties"].get("delegations", [])]
+        == ["Microsoft.App/environments"]
+    )
+    assert _env(_apps(resources)["frontend"])["NGINX_REAL_IP_FROM"] == {
+        "name": "NGINX_REAL_IP_FROM",
+        "value": infrastructure,
+    }

@@ -31,12 +31,14 @@ LABEL org.opencontainers.image.title="nuvexa-autotask-dashboard" \
       org.opencontainers.image.description="NUVEXA AutoTask (by Elarxsys) web dashboard" \
       org.opencontainers.image.vendor="Elarxsys"
 
-# API_UPSTREAM (and the DNS resolvers from /etc/resolv.conf) are rendered into the server config at
+# API_UPSTREAM, NGINX_REAL_IP_FROM (trusted proxy CIDR) and the DNS resolvers from /etc/resolv.conf are
+# rendered into the server config at
 # container start by the image's stock entrypoint. The filter restricts envsubst to exactly these
 # two variables, so nginx runtime variables ($host, $uri, …) are never touched.
 ENV API_UPSTREAM=http://api:8000 \
+    NGINX_REAL_IP_FROM=127.0.0.1/32 \
     NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
-    NGINX_ENVSUBST_FILTER=^(API_UPSTREAM|NGINX_LOCAL_RESOLVERS)$ \
+    NGINX_ENVSUBST_FILTER=^(API_UPSTREAM|NGINX_LOCAL_RESOLVERS|NGINX_REAL_IP_FROM)$ \
     NGINX_ENTRYPOINT_QUIET_LOGS=1
 
 # Rendered to /etc/nginx/conf.d/default.conf (replacing the stock server) on every start.

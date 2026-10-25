@@ -142,12 +142,13 @@ default on) calls to `http://<app-name>` are still TLS-encrypted between the app
 **Client IP integrity.** The API uses the forwarded client address for login rate limiting and audit
 records, so nginx *overwrites* `X-Forwarded-For` with `$remote_addr` instead of appending a
 client-supplied value. When another proxy terminates traffic first (the Container Apps ingress),
-`$remote_addr` is that proxy: add `set_real_ip_from <ingress/infrastructure subnet>;` and
-`real_ip_header X-Forwarded-For;` to the nginx config so `$remote_addr` becomes the real client before
+`$remote_addr` is that proxy: nginx must trust that proxy's `X-Forwarded-For` (`set_real_ip_from`, `real_ip_header X-Forwarded-For`,
+`real_ip_recursive on`) so `$remote_addr` becomes the real client before
 it is forwarded, and keep `FORWARDED_ALLOW_IPS` on the API restricted to the frontend's network.
-At the time of writing `frontend/nginx.conf` does not set `set_real_ip_from`, so until it does, the API
-sees the ingress proxy's address as the client of every request (login rate limits are then shared by
-all users).
+The frontend image does this with the realip module: set `NGINX_REAL_IP_FROM` to the proxy's CIDR (the
+infrastructure subnet; `infra/azure/main.bicep` sets it). The image default `127.0.0.1/32` trusts no real proxy,
+so without it the API would see the ingress address as the client of every request and login rate limits would
+be shared by all users.
 
 ## Database
 
@@ -217,8 +218,10 @@ the runtime role only after the job succeeded.
 
 Configure the job with the owner secret instead of `database-url`:
 `--secrets database-migrate-url=keyvaultref:$KVURI/database-migrate-url,identityref:<migrate-identity>` and
-`--env-vars DATABASE_URL=secretref:database-migrate-url DATABASE_RUNTIME_ROLE=nuvexa_app` (plus the other
-shared variables). Only the job may reference `database-migrate-url`: give the job **its own** user-assigned
+`--env-vars DATABASE_URL=secretref:database-migrate-url DATABASE_RUNTIME_ROLE=nuvexa_app DEMO_MODE=false
+LOG_FORMAT=json LOG_LEVEL=INFO` — nothing else: the job needs no token-encryption, audit or provider secrets, and
+anyone who can start a job can use the secrets it references (infra/azure/main.bicep configures exactly this).
+Only the job may reference `database-migrate-url`: give the job **its own** user-assigned
 managed identity with *Key Vault Secrets User* scoped to that one secret, and scope the apps' identity to
 their secrets (or use a separate vault) — with one identity holding the role on the whole vault, a
 compromised `api` could read the owner credentials from Key Vault and the role split would protect little.
