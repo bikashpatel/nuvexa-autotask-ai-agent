@@ -58,6 +58,15 @@ REQUIRED_STAGES: dict[str, tuple[str, list[str]]] = {
     "container image scan": ("containers", [r"trivy\b.* image\b.*--exit-code 1"]),
     "container SBOM": ("containers", [r"--format cyclonedx"]),
     "configuration scan": ("pipeline-config", [r"trivy\b.* config\b.*--exit-code 1"]),
+    "infrastructure as code: lint and generated ARM template in sync": (
+        "pipeline-config",
+        [
+            r"bicep lint\b",
+            r"bicep build-params\b",
+            r"bicep build infra/azure/main\.bicep",
+            r"diff -u infra/azure/main\.json",
+        ],
+    ),
     "workflow lint": ("pipeline-config", [r"actionlint", r"zizmor"]),
     "scanner exceptions register": ("pipeline-config", [r"check_security_exceptions\.py"]),
     "opt-in system E2E": ("e2e", [r"scripts/e2e\.sh"]),
@@ -144,9 +153,22 @@ def test_scanner_images_are_pinned_by_digest() -> None:
         "TRIVY_IMAGE",
         "ACTIONLINT_IMAGE",
         "ZIZMOR_IMAGE",
+        "BICEP_IMAGE",
     }
     for name, ref in images:
         assert re.search(r":[\w.-]+@sha256:[0-9a-f]{64}$", ref), f"{name} must be pinned as name:tag@sha256:digest"
+
+
+def test_the_bicep_cli_is_pinned_and_verified_before_use() -> None:
+    script = SCAN_SCRIPT.read_text()
+    assert re.search(r'^BICEP_VERSION="\d+\.\d+\.\d+"$', script, re.M)
+    for arch in ("X64", "ARM64"):
+        assert re.search(rf'^BICEP_SHA256_LINUX_{arch}="[0-9a-f]{{64}}"$', script, re.M), arch
+    body = re.search(r"^bicep\(\) \{\n(.*?)^\}", script, re.S | re.M)
+    assert body, "scripts/security-scan.sh defines bicep()"
+    # The downloaded binary is checked against the pinned sum before every run, and runs without network access.
+    assert body.group(1).count('"$(sha256_of "$binary")" != "$expected"') == 2
+    assert "--network none" in body.group(1)
 
 
 def test_integration_tests_run_against_an_isolated_postgres_service() -> None:
