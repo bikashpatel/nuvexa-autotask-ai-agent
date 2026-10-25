@@ -136,6 +136,9 @@ class AzureDevOpsIntegrationOut(BaseModel):
     configured: bool
     requires_user_connection: bool
     user_connected: bool
+    # The current user's own delegated Azure DevOps connection (revoke it with DELETE /integrations/connections/{id});
+    # None when not connected.
+    connection: ConnectionOut | None
     default_project: str | None
     default_work_item_type: str
     api_version: str

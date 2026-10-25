@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, Request
+from fastapi import Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.middleware import SlidingWindowRateLimiter, client_ip
@@ -17,6 +17,11 @@ from app.services.authz import Actor
 from app.services.identity import actor_from_user
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# Pagination offset shared by every list endpoint. Bounded so that huge values are a 422, never a database
+# driver overflow (offsets >= 2**63 do not fit a 64-bit integer) answered with a 500.
+MAX_OFFSET = 1_000_000
+Offset = Annotated[int, Query(ge=0, le=MAX_OFFSET)]
 
 
 def get_settings_dep(request: Request) -> Settings:

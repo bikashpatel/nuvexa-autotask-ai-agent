@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import or_, select
 
-from app.api.deps import ActorDep, SessionDep, SettingsDep, rate_limit
+from app.api.deps import ActorDep, Offset, SessionDep, SettingsDep, rate_limit
 from app.api.presenters import email_detail, run_out
 from app.db.models import EmailMessage
 from app.domain.enums import EmailAnalysisStatus, EmailCategory, Priority
@@ -20,7 +20,6 @@ from app.services.workflow_service import WorkflowService
 router = APIRouter(prefix="/emails", tags=["emails"])
 
 Limit = Annotated[int, Query(ge=1, le=100)]
-Offset = Annotated[int, Query(ge=0)]
 
 
 @router.get("", response_model=Page[EmailListItem])

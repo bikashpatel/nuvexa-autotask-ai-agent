@@ -76,8 +76,9 @@ async def demo_login(
     body: DemoLoginRequest, request: Request, response: Response, session: SessionDep, settings: SettingsDep
 ) -> MeOut:
     sessions = SessionService(settings)
-    await sessions.revoke_token(session, request.cookies.get(settings.session_cookie_name))
+    # Login first: a refused login commits only its audit event, never the revocation of the presented session.
     user = await DemoAuthService(settings).login(session, body.persona, ip=client_ip(request))
+    await sessions.revoke_token(session, request.cookies.get(settings.session_cookie_name))
     issued = await sessions.issue(session, user, ip=client_ip(request), user_agent=request.headers.get("user-agent"))
     await session.commit()
     set_session_cookies(response, settings, issued)
@@ -135,7 +136,7 @@ async def oauth_callback(
         )
     except AppError as exc:
         await session.rollback()
-        log.warning("oauth_callback_failed", code=exc.code)
+        log.warning("oauth_callback_failed", error_code=exc.code)  # `code` would be redacted as an OAuth code
         response = RedirectResponse(f"{base}/login?error={exc.code}", status_code=status.HTTP_302_FOUND)
         response.delete_cookie(OAUTH_BINDING_COOKIE, path="/api/v1/auth/callback")
         return response
