@@ -7,6 +7,7 @@ import uuid
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.presenters import (
@@ -49,15 +50,16 @@ def _action(status: ActionStatus, errors: list[str]) -> ProposedAction:
     return ProposedAction(owner_user_id=OWNER_ID, status=status, validation_errors=errors)
 
 
-CASES = list(itertools.product(UserRole, [True, False], ActionStatus, [False, True], [False, True]))
+CASES = list(itertools.product(UserRole, [True, False], ActionStatus, [False, True], [False, True], [False, True]))
 
 
-@pytest.mark.parametrize(("role", "own", "status", "has_errors", "approved"), CASES)
+@pytest.mark.parametrize(("role", "own", "status", "has_errors", "approved", "stale"), CASES)
 def test_action_permissions_truth_table(
-    role: UserRole, own: bool, status: ActionStatus, has_errors: bool, approved: bool
+    role: UserRole, own: bool, status: ActionStatus, has_errors: bool, approved: bool, stale: bool
 ) -> None:
     actor = _actor(role, OWNER_ID if own else uuid.uuid4())
-    perms = action_permissions(actor, _action(status, ["Missing project"] if has_errors else []), approved)
+    action = _action(status, ["Missing project"] if has_errors else [])
+    perms = action_permissions(actor, action, approved, stale_execution=stale)
     # Oracle from the role model: viewers never act; members act on their own actions; approvers/admins on any.
     may_act = role in (UserRole.APPROVER, UserRole.ADMIN) or (role is UserRole.MEMBER and own)
     assert perms.can_edit is (may_act and status in (A.PENDING_APPROVAL, A.APPROVED, A.FAILED))
@@ -65,7 +67,8 @@ def test_action_permissions_truth_table(
     assert perms.can_reject is (may_act and status in (A.PENDING_APPROVAL, A.APPROVED))
     assert perms.can_cancel is (may_act and status in (A.PENDING_APPROVAL, A.APPROVED, A.FAILED))
     assert perms.can_execute is (may_act and status in (A.APPROVED, A.FAILED) and approved)
-    assert perms.can_reconcile is (may_act and status is A.UNCERTAIN)
+    # Reconcile: unknown outcomes, and executions whose worker is gone (no live execution).
+    assert perms.can_reconcile is (may_act and (status is A.UNCERTAIN or (status is A.EXECUTING and stale)))
 
 
 @pytest.mark.parametrize("status", [A.COMPLETED, A.REJECTED, A.CANCELLED, A.SUPERSEDED, A.EXECUTING])
@@ -148,7 +151,7 @@ async def test_action_out_and_detail(
     assert isinstance(approver, User)
     assert isinstance(action, ProposedAction)
     async with db.session() as s:
-        out = await action_out(s, actor_from_user(owner), action)
+        out = await action_out(s, actor_from_user(owner), action, settings=db.settings)
         assert out.email_subject == "Printer on fire"
         assert out.current_approval is not None
         assert out.current_approval.action_version == 2
@@ -157,7 +160,7 @@ async def test_action_out_and_detail(
         assert out.permissions.can_execute is True
         assert out.permissions.can_approve is False
 
-        detail = await action_detail(s, actor_from_user(owner), action)
+        detail = await action_detail(s, actor_from_user(owner), action, settings=db.settings)
         assert [a.action_version for a in detail.approvals] == [1, 2]  # chronological
         assert [a.decided_by_name for a in detail.approvals] == [owner.display_name, approver.display_name]
         assert detail.approvals[0].invalidated_reason == "edited"
@@ -178,12 +181,40 @@ async def test_action_out_without_approval_or_email(
         loaded.version = 3  # no approval matches the new version
         await s.commit()
         viewer = _actor(UserRole.VIEWER, uuid.uuid4())
-        out = await action_out(s, viewer, loaded)
+        out = await action_out(s, viewer, loaded, settings=db.settings)
         assert out.current_approval is None
         assert out.permissions is not None
         assert not any(out.permissions.model_dump().values())
         loaded.email_message_id = uuid.uuid4()  # dangling reference is rendered without a subject
-        assert (await action_out(s, viewer, loaded)).email_subject is None
+        assert (await action_out(s, viewer, loaded, settings=db.settings)).email_subject is None
+
+
+@pytest.mark.parametrize(("age_seconds", "reconcilable"), [(0, False), (310, True)])
+async def test_executing_action_is_reconcilable_only_once_its_execution_is_stale(
+    db: Database, session: AsyncSession, tenant: Tenant, make_user: UserFactory, age_seconds: int, reconcilable: bool
+) -> None:
+    w = await _world(db, session, tenant, make_user)
+    owner, action = w["owner"], w["action"]
+    assert isinstance(owner, User)
+    assert isinstance(action, ProposedAction)
+    assert db.settings.job_lease_seconds == 300
+    async with db.session() as s:
+        loaded = await s.get(ProposedAction, action.id)
+        assert loaded is not None
+        loaded.status = A.EXECUTING
+        [failed] = [e for e in await _executions(s, action) if e.status is ExecutionStatus.FAILED]
+        failed.status = ExecutionStatus.RUNNING  # attempt 1 is "in flight" since `age_seconds`
+        failed.started_at = utcnow() - timedelta(seconds=age_seconds)
+        await s.commit()
+        out = await action_out(s, actor_from_user(owner), loaded, settings=db.settings)
+    assert out.permissions is not None
+    assert out.permissions.can_reconcile is reconcilable
+    assert out.permissions.can_execute is False
+
+
+async def _executions(s: AsyncSession, action: ProposedAction) -> list[ActionExecution]:
+    stmt = select(ActionExecution).where(ActionExecution.action_id == action.id)
+    return list((await s.execute(stmt)).scalars().all())
 
 
 async def test_email_detail(db: Database, session: AsyncSession, tenant: Tenant, make_user: UserFactory) -> None:

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import String, select, text
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import Settings
 from app.db.base import NAMING_CONVENTION, Base, UTCDateTime, short_str, str_enum
@@ -158,6 +159,38 @@ async def test_database_session_and_dispose(tmp_path: Path) -> None:
     async with database.session() as s:
         assert (await s.execute(text("SELECT 2"))).scalar_one() == 2
     await database.dispose()
+
+
+async def _tenant_slugs(db: Database) -> set[str]:
+    async with db.session() as s:
+        return set((await s.execute(select(Tenant.slug))).scalars().all())
+
+
+@pytest.mark.parametrize("outcome", ["rollback", "commit"])
+async def test_a_savepoint_that_is_the_first_write_belongs_to_the_enclosing_transaction(
+    db: Database, outcome: str
+) -> None:
+    # SQLite: the driver emits no BEGIN before SAVEPOINT, so RELEASE used to commit the row on its own.
+    async with db.session() as s:
+        assert (await s.execute(select(Tenant.id))).first() is None  # reads first: still no transaction
+        async with s.begin_nested():
+            s.add(Tenant(name="Nested", slug="t-nested"))
+        await (s.rollback() if outcome == "rollback" else s.commit())
+    assert await _tenant_slugs(db) == (set() if outcome == "rollback" else {"t-nested"})
+
+
+@pytest.mark.parametrize("outcome", ["rollback", "commit"])
+async def test_a_savepoint_after_a_write_nests_in_the_open_transaction(db: Database, outcome: str) -> None:
+    async with db.session() as s:
+        s.add(Tenant(name="Outer", slug="t-outer"))
+        await s.flush()  # the driver BEGINs before this INSERT
+        async with s.begin_nested():
+            s.add(Tenant(name="Inner", slug="t-inner"))
+        with pytest.raises(IntegrityError):  # a failed savepoint rolls back alone; the transaction goes on
+            async with s.begin_nested():
+                s.add(Tenant(name="Duplicate", slug="t-inner"))
+        await (s.rollback() if outcome == "rollback" else s.commit())
+    assert await _tenant_slugs(db) == (set() if outcome == "rollback" else {"t-outer", "t-inner"})
 
 
 async def test_url_override_wins_over_settings(tmp_path: Path) -> None:

@@ -98,7 +98,7 @@ class Worker:
     async def run_job(self, job: Job) -> None:
         set_correlation_id(job.correlation_id or new_correlation_id())
         log.info("job_started", job_id=str(job.id), job_type=job.job_type.value, attempt=job.attempts)
-        heartbeat = asyncio.create_task(self._heartbeat(job.id))
+        heartbeat = asyncio.create_task(self._heartbeat(job))
         try:
             result = await self.handlers.handle(job)
         except Exception as exc:
@@ -106,11 +106,12 @@ class Worker:
             message = exc.message if isinstance(exc, AppError) else f"{type(exc).__name__}"
             async with self.db.session() as s:
                 status = await queue.fail(s, job, message, retryable=retryable)
+            # status None: the lease was recovered and the job belongs to another attempt now; leave it alone.
             log.warning(
                 "job_failed",
                 job_id=str(job.id),
                 job_type=job.job_type.value,
-                status=status.value,
+                status=status.value if status is not None else "lease_lost",
                 retryable=retryable,
                 error=message,
             )
@@ -118,24 +119,30 @@ class Worker:
                 log.exception("job_unexpected_error", job_id=str(job.id))
         else:
             async with self.db.session() as s:
-                await queue.complete(s, job.id, result)
-            log.info("job_succeeded", job_id=str(job.id), job_type=job.job_type.value)
+                completed = await queue.complete(s, job, result)
+            if completed:
+                log.info("job_succeeded", job_id=str(job.id), job_type=job.job_type.value)
+            else:  # finished after its lease was recovered: the current holder's outcome stands
+                log.warning("job_result_discarded", job_id=str(job.id), job_type=job.job_type.value)
         finally:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
             set_correlation_id(None)
 
-    async def _heartbeat(self, job_id: uuid.UUID) -> None:
+    async def _heartbeat(self, job: Job) -> None:
         """Keep the lease fresh while the job runs; only jobs of dead workers are recovered."""
         interval = max(5.0, self.settings.job_lease_seconds / 3)
         while True:
             await asyncio.sleep(interval)
             try:
                 async with self.db.session() as s:
-                    await queue.heartbeat(s, job_id)
+                    held = await queue.heartbeat(s, job)
             except Exception:
-                log.warning("job_heartbeat_failed", job_id=str(job_id))
+                log.warning("job_heartbeat_failed", job_id=str(job.id))
+                continue
+            if not held:  # the lease was recovered (this worker stalled); never extend another holder's lease
+                return
 
     async def run_once(self, max_jobs: int = 100) -> int:
         """Process queued jobs sequentially until none are runnable (used by tests and the demo)."""

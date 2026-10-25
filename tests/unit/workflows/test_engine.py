@@ -94,6 +94,21 @@ async def test_resume_with_pending_step_reruns_it(wf: WF, kind: str) -> None:
     assert not [e for e in await get_events(wf.db, run.id) if e.event_type is E.RESUME]
 
 
+async def test_cancel_with_pending_step_halts_and_finalizes_without_rerunning_it(wf: WF) -> None:
+    run = await wf.new_run()
+    wf.agent.fail("plan", AgentProviderError("down"))
+    with pytest.raises(AgentProviderError):
+        await wf.start(run)
+    await set_run_fields(wf.db, run.id, status=WorkflowStatus.CANCELLED)  # WorkflowService.cancel
+    await wf.resume(run, wf.decision("cancel"))
+    assert wf.agent.calls == ["classify", "extract", "plan"]  # the parked step halted before its model call
+    finished = await get_run(wf.db, run.id)
+    assert (finished.status, finished.current_step) == (WorkflowStatus.CANCELLED, "finalize")
+    assert finished.completed_at is not None
+    assert not (await wf.snapshot(run)).next
+    assert [a.details for a in await get_audits(wf.db, wf.tenant, "workflow_finished")] == [{"status": "cancelled"}]
+
+
 async def test_resume_execute_while_analysis_failed_uses_fallback(wf: WF) -> None:
     run = await wf.new_run()
     wf.agent.fail("plan", AgentProviderError("down"))
@@ -162,6 +177,15 @@ async def test_fallback_app_error_is_swallowed_and_status_resynced(wf: WF) -> No
     wf.execution.errors["reconcile"] = StaleVersion()
     await _fresh_engine(wf).resume(run.id, run.tenant_id, wf.decision("reconcile", action))
     assert any("handled 'reconcile'" in (e.message or "") for e in await get_events(wf.db, run.id))
+
+
+@pytest.mark.parametrize("kind", ["execute", "reconcile"])
+async def test_fallback_drops_a_malformed_request_without_calling_the_services(wf: WF, kind: str) -> None:
+    run, _ = await _reviewing(wf)
+    decision = wf.decision(kind, action_id="not-a-uuid")  # e.g. a damaged job row
+    await _fresh_engine(wf).resume(run.id, run.tenant_id, decision)  # type: ignore[arg-type]
+    assert wf.execution.calls == []
+    assert any(f"handled '{kind}'" in (e.message or "") for e in await get_events(wf.db, run.id))
 
 
 async def test_fallback_with_real_execution_after_run_finished(wf: WF) -> None:

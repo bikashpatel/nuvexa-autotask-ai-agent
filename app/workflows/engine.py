@@ -54,8 +54,9 @@ class WorkflowEngine:
             resume: Command[Any] = Command(resume=dict(decision))
             await self.graph.ainvoke(resume, config, durability="sync")
             return
-        if snapshot.next and decision.get("type") in ("reanalyze", "refresh"):
-            # A previous analysis step failed; re-run it from the checkpoint.
+        if snapshot.next and decision.get("type") in ("reanalyze", "refresh", "cancel"):
+            # A previous step failed; re-run it from the checkpoint. For a cancel, the re-run node sees the
+            # cancelled run, halts before doing any work, and the graph finalizes the run.
             await self.graph.ainvoke(None, config, durability="sync")
             return
         if not snapshot.values and decision.get("type") == "reanalyze":
@@ -88,7 +89,8 @@ class WorkflowEngine:
                     await record_permission_denied(sf, exc)
                 except AppError as exc:
                     await s.rollback()
-                    log.warning("workflow_fallback_operation_failed", code=exc.code, run_id=str(run_id))
+                    # `error_code`, not `code`: the log redaction masks `code` (OAuth authorization codes).
+                    log.warning("workflow_fallback_operation_failed", error_code=exc.code, run_id=str(run_id))
                 except ValueError, TypeError:  # malformed resume payload
                     await s.rollback()
                     log.warning("workflow_fallback_malformed_request", run_id=str(run_id))

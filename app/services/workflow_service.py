@@ -35,6 +35,10 @@ _ANALYSIS_IN_PROGRESS = (
     WorkflowStatus.VALIDATED,
     WorkflowStatus.ACTION_PROPOSED,
 )
+# An external write may be in flight or its outcome is unknown: only reconciliation may move these actions, and their
+# approval must stay bound to them until it does (cancelling would leave a reconcilable, re-executable action behind).
+_OUTCOME_PENDING = (ActionStatus.EXECUTING, ActionStatus.UNCERTAIN)
+_CANCELLABLE = (ActionStatus.PENDING_APPROVAL, ActionStatus.APPROVED, ActionStatus.FAILED)
 
 
 async def active_run_for_email(session: AsyncSession, email_id: uuid.UUID) -> WorkflowRun | None:
@@ -154,8 +158,9 @@ class WorkflowService:
         busy = (
             await session.execute(
                 select(ProposedAction.id).where(
+                    ProposedAction.tenant_id == run.tenant_id,
                     ProposedAction.workflow_run_id == run.id,
-                    ProposedAction.status.in_([ActionStatus.EXECUTING, ActionStatus.UNCERTAIN]),
+                    ProposedAction.status.in_(_OUTCOME_PENDING),
                 )
             )
         ).first()
@@ -187,20 +192,25 @@ class WorkflowService:
             resource_id=str(run.id),
         )
         ensure_workflow_transition(run.status, WorkflowStatus.CANCELLED)
+        # Lock the run's actions: an executor claiming one (approved → executing) either commits first and is seen
+        # here, or waits for this transaction and then finds the action cancelled (PostgreSQL row locks).
         actions = (
             (
                 await session.execute(
-                    select(ProposedAction).where(
+                    select(ProposedAction)
+                    .where(
+                        ProposedAction.tenant_id == run.tenant_id,
                         ProposedAction.workflow_run_id == run.id,
-                        ProposedAction.status.in_(
-                            [ActionStatus.PENDING_APPROVAL, ActionStatus.APPROVED, ActionStatus.FAILED]
-                        ),
+                        ProposedAction.status.in_(_CANCELLABLE + _OUTCOME_PENDING),
                     )
+                    .with_for_update()
                 )
             )
             .scalars()
             .all()
         )
+        if any(action.status in _OUTCOME_PENDING for action in actions):
+            raise Conflict("Resolve executing or uncertain actions before cancelling the workflow.")
         for action in actions:
             ensure_action_transition(action.status, ActionStatus.CANCELLED)
             await invalidate_approvals(session, action, "workflow cancelled")

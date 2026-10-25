@@ -16,6 +16,22 @@ from app.domain.enums import JobStatus, JobType
 JobFactory = Callable[..., Awaitable[Job]]
 
 
+class RecordingLog:
+    """Stands in for a module's structlog logger (structlog caches configured loggers, so capture is unreliable)."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def __getattr__(self, level: str) -> Callable[..., None]:
+        def record(event: str, **fields: Any) -> None:
+            self.events.append({"event": event, "level": level, **fields})
+
+        return record
+
+    def named(self, event: str) -> list[dict[str, Any]]:
+        return [e for e in self.events if e["event"] == event]
+
+
 @pytest.fixture
 def add_job(db: Database) -> JobFactory:
     """Insert a job row directly (bypassing enqueue) with arbitrary state."""

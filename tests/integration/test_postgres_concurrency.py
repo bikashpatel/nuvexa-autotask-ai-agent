@@ -129,7 +129,7 @@ async def test_concurrent_workers_never_run_a_job_twice_and_respect_concurrency_
             if key is not None:
                 active[key] -= 1
             async with harness.db.session() as s:
-                await queue.complete(s, job.id, {"by": name})
+                assert await queue.complete(s, job, {"by": name})
             done += 1
 
     await asyncio.wait_for(asyncio.gather(*(worker(f"w{i}") for i in range(5))), timeout=60)

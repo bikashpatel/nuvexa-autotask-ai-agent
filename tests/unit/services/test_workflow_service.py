@@ -371,6 +371,41 @@ async def test_cancel_refuses_terminal_and_executing_runs(
     assert await fresh.audits("workflow_cancelled") == []
 
 
+@pytest.mark.parametrize("pending_outcome", [ActionStatus.EXECUTING, ActionStatus.UNCERTAIN])
+@pytest.mark.parametrize("run_status", REVIEWABLE)
+async def test_cancel_refuses_while_an_external_write_outcome_is_pending(
+    session: AsyncSession,
+    settings: Settings,
+    factory: Factory,
+    world: World,
+    fresh: Fresh,
+    pending_outcome: ActionStatus,
+    run_status: WorkflowStatus,
+) -> None:
+    # Cancelling would leave the in-flight/uncertain action holding its approval: once reconciled to "failed"
+    # (nothing created) it would be executable again in a cancelled workflow.
+    run = await factory.run(await factory.email(world.account), run_status)
+    run_id = run.id
+    open_id = (await factory.action(run, REPLY, status=ActionStatus.APPROVED)).id
+    busy, approval = await factory.approved_action(run, world.approver, WI, status=pending_outcome)
+    busy_id, approval_id = busy.id, approval.id
+    with pytest.raises(Conflict, match="executing or uncertain"):
+        await WorkflowService(settings).cancel(session, world.actor(world.owner), run_id)
+    await session.rollback()
+    stored_run = await fresh.get(WorkflowRun, run_id)
+    assert stored_run is not None
+    assert stored_run.status is run_status
+    for action_id, status in ((open_id, ActionStatus.APPROVED), (busy_id, pending_outcome)):
+        stored = await fresh.get(ProposedAction, action_id)
+        assert stored is not None
+        assert stored.status is status
+    stored_approval = await fresh.get(ActionApproval, approval_id)
+    assert stored_approval is not None
+    assert stored_approval.invalidated_at is None
+    assert await fresh.audits("workflow_cancelled") == []
+    assert await fresh.jobs() == []
+
+
 async def test_cancel_permissions(session: AsyncSession, settings: Settings, factory: Factory, world: World) -> None:
     service = WorkflowService(settings)
     with pytest.raises(NotFound):

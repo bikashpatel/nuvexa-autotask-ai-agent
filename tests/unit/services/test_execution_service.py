@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -35,12 +36,14 @@ from app.domain.enums import (
     ExecutionStatus,
     FailureCategory,
     UserRole,
+    WorkflowStatus,
 )
 from app.integrations.azure_devops.base import CreateOutcomeStatus
 from app.integrations.azure_devops.mapping import build_create_request, idempotency_tag
 from app.integrations.azure_devops.mock import MockAzureDevOpsClient, MockWorkItem
 from app.schemas.actions import AzureDevOpsWorkItemPayload, NoActionPayload
 from app.schemas.settings import TenantSettings
+from app.services import execution_service as execution_module
 from app.services.authz import Actor, AuditedPermissionDenied, Perm
 from app.services.execution_service import ExecutionService, _category, _sanitize_summary
 from tests.unit.services.conftest import (
@@ -617,6 +620,70 @@ async def test_execute_blocked_status_is_audited(
     assert ado.clients == []
 
 
+CLOSED_RUNS = [WorkflowStatus.CANCELLED, WorkflowStatus.REJECTED]
+
+
+async def _in_closed_run(factory: Factory, world: World, run_status: WorkflowStatus, status: ActionStatus) -> Any:
+    """Inconsistent state set up directly: an approved/failed action with a live approval in a closed run."""
+    action, _ = await _approved(factory, world, status=status)
+    world.run.status = run_status
+    await factory.session.commit()
+    return action
+
+
+@pytest.mark.parametrize("status", [S.APPROVED, S.FAILED])
+@pytest.mark.parametrize("run_status", CLOSED_RUNS)
+async def test_execute_refuses_actions_of_a_closed_workflow(
+    svc: ExecutionService,
+    session: AsyncSession,
+    factory: Factory,
+    world: World,
+    fresh: Fresh,
+    ado: FakeAdo,
+    run_status: WorkflowStatus,
+    status: ActionStatus,
+) -> None:
+    action = await _in_closed_run(factory, world, run_status, status)
+    with pytest.raises(InvalidStateTransition, match=f"workflow is {run_status}"):
+        await svc.execute(session, world.actor(world.owner), action.id)
+    [audit] = await fresh.audits("execution_blocked", action_id=action.id)
+    assert (audit.outcome, audit.actor_user_id) == (AuditOutcome.DENIED, world.owner.id)
+    assert audit.details == {"status": status.value, "workflow_status": run_status.value}
+    assert ado.clients == []
+    assert await _executions(fresh, action) == []
+    assert (await _action(fresh, action)).status is status
+
+
+@pytest.mark.parametrize("run_status", CLOSED_RUNS)
+async def test_preflight_refuses_actions_of_a_closed_workflow(
+    svc: ExecutionService,
+    session: AsyncSession,
+    factory: Factory,
+    world: World,
+    fresh: Fresh,
+    run_status: WorkflowStatus,
+) -> None:
+    action = await _in_closed_run(factory, world, run_status, S.APPROVED)
+    with pytest.raises(InvalidStateTransition, match=f"workflow is {run_status}"):
+        await svc.preflight(
+            session, world.actor(world.owner), action.id, version=action.version, payload_hash=action.payload_hash
+        )
+    [audit] = await fresh.audits("execution_blocked", action_id=action.id)
+    assert audit.details == {"status": "approved", "workflow_status": run_status.value}
+
+
+async def test_failed_actions_of_a_failed_workflow_stay_retryable(
+    svc: ExecutionService, session: AsyncSession, factory: Factory, world: World, fresh: Fresh, ado: FakeAdo
+) -> None:
+    action = await _in_closed_run(factory, world, WorkflowStatus.FAILED, S.FAILED)  # FAILED is not closed
+    actor = world.actor(world.owner)
+    await svc.preflight(session, actor, action.id, version=action.version, payload_hash=action.payload_hash)
+    execution = await svc.execute(session, actor, action.id)
+    assert execution.status is E.SUCCEEDED
+    assert len(ado.items()) == 1
+    assert await fresh.audits("execution_blocked") == []
+
+
 @pytest.mark.parametrize("field", ["version", "hash"])
 async def test_execute_rejects_stale_expectations(
     svc: ExecutionService, session: AsyncSession, factory: Factory, world: World, ado: FakeAdo, field: str
@@ -670,16 +737,39 @@ async def test_execute_denies_inactive_or_foreign_actor(
     assert ado.clients == []
 
 
+@pytest.mark.parametrize("lagging", [S.APPROVED, S.FAILED])
 async def test_execute_repairs_status_after_previous_success(
-    svc: ExecutionService, session: AsyncSession, factory: Factory, world: World, fresh: Fresh, ado: FakeAdo
+    svc: ExecutionService,
+    session: AsyncSession,
+    factory: Factory,
+    world: World,
+    fresh: Fresh,
+    ado: FakeAdo,
+    lagging: ActionStatus,
 ) -> None:
-    action, approval = await _approved(factory, world)
-    previous = await factory.execution(action, approval, world.owner, status=E.SUCCEEDED, external_id="1001")
+    action, approval = await _approved(factory, world, status=lagging, last_error="stale error")
+    finished = utcnow() - timedelta(minutes=3)
+    previous = await factory.execution(
+        action,
+        approval,
+        world.owner,
+        status=E.SUCCEEDED,
+        external_id="1001",
+        external_url="https://dev.azure.com/x/_workitems/edit/1001",
+        finished_at=finished,
+    )
     result = await svc.execute(session, world.actor(world.owner), action.id)
     assert result.id == previous.id
-    assert (await _action(fresh, action)).status is S.COMPLETED
+    stored = await _action(fresh, action)
+    assert stored.status is S.COMPLETED
+    assert (stored.external_id, stored.external_url, stored.last_error) == ("1001", previous.external_url, None)
+    assert stored.executed_at == finished
     assert ado.clients == []
     assert len(await _executions(fresh, action)) == 1
+    # Invariant 9: the status change is audited (it used to be a silent update).
+    [audit] = await fresh.audits("execution_status_repaired", action_id=action.id)
+    assert (audit.outcome, audit.actor_user_id) == (AuditOutcome.SUCCESS, world.owner.id)
+    assert audit.details == {"from_status": lagging.value, "execution_id": str(previous.id), "external_id": "1001"}
 
 
 async def test_revalidation_policy_failure_records_failed_execution(
@@ -965,6 +1055,129 @@ async def test_reconcile_permissions(
     with pytest.raises(AuditedPermissionDenied) as info:
         await svc.reconcile(session, world.actor(world.viewer), viewer_action.id)
     assert info.value.permission == Perm.ACTION_EXECUTE
+
+
+# ---------------------------------------------------------------------------------------------
+# reconcile pre-flight (API) and execution liveness
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "running_since_seconds"),
+    [(S.UNCERTAIN, None), (S.EXECUTING, 310), (S.EXECUTING, None)],  # stale lease, or no running row at all
+)
+async def test_reconcile_preflight_accepts_unknown_outcomes(
+    svc: ExecutionService,
+    session: AsyncSession,
+    factory: Factory,
+    world: World,
+    status: ActionStatus,
+    running_since_seconds: int | None,
+) -> None:
+    action, approval = await _approved(factory, world, status=status)
+    if running_since_seconds is not None:
+        started = utcnow() - timedelta(seconds=running_since_seconds)
+        await factory.execution(action, approval, world.owner, status=E.RUNNING, started_at=started)
+    assert not await svc.has_live_execution(session, action)
+    checked = await svc.reconcile_preflight(session, world.actor(world.owner), action.id)
+    assert checked.id == action.id
+
+
+async def test_reconcile_preflight_refuses_a_live_execution(
+    svc: ExecutionService, session: AsyncSession, factory: Factory, world: World
+) -> None:
+    action, approval = await _approved(factory, world, status=S.EXECUTING)
+    started = utcnow() - timedelta(seconds=svc.settings.job_lease_seconds - 30)  # still inside the lease
+    await factory.execution(action, approval, world.owner, status=E.RUNNING, started_at=started)
+    assert await svc.has_live_execution(session, action)
+    with pytest.raises(Conflict, match="still executing"):
+        await svc.reconcile_preflight(session, world.actor(world.owner), action.id)
+
+
+@pytest.mark.parametrize("status", [S.APPROVED, S.COMPLETED, S.FAILED, S.PENDING_APPROVAL, S.CANCELLED])
+async def test_reconcile_preflight_refuses_settled_actions(
+    svc: ExecutionService, session: AsyncSession, factory: Factory, world: World, status: ActionStatus
+) -> None:
+    action = await factory.action(world.run, status=status)
+    with pytest.raises(InvalidStateTransition, match="Only uncertain actions can be reconciled"):
+        await svc.reconcile_preflight(session, world.actor(world.owner), action.id)
+
+
+async def test_reconcile_preflight_permissions(
+    svc: ExecutionService, session: AsyncSession, factory: Factory, world: World
+) -> None:
+    action, _ = await _approved(factory, world, status=S.UNCERTAIN)
+    with pytest.raises(NotFound):
+        await svc.reconcile_preflight(session, world.actor(world.other), action.id)
+    viewer_action, _ = await factory.approved_action(
+        await _viewer_owned_run(factory, world), world.approver, status=S.UNCERTAIN
+    )
+    with pytest.raises(AuditedPermissionDenied) as info:
+        await svc.reconcile_preflight(session, world.actor(world.viewer), viewer_action.id)
+    assert info.value.permission == Perm.ACTION_EXECUTE
+    assert (await svc.reconcile_preflight(session, world.actor(world.approver), action.id)).id == action.id
+
+
+async def test_liveness_ignores_other_actions_and_finished_executions(
+    svc: ExecutionService, session: AsyncSession, factory: Factory, world: World
+) -> None:
+    action, approval = await _approved(factory, world, status=S.EXECUTING)
+    other, other_approval = await _approved(factory, world, REPLY, status=S.EXECUTING)
+    await factory.execution(other, other_approval, world.owner, status=E.RUNNING)  # another action's live write
+    await factory.execution(action, approval, world.owner, status=E.UNCERTAIN)  # finished, outcome unknown
+    assert not await svc.has_live_execution(session, action)
+    assert await svc.has_live_execution(session, other)
+
+
+# ---------------------------------------------------------------------------------------------
+# Write budget: the external create is bounded below the execution lease
+# ---------------------------------------------------------------------------------------------
+
+
+class _HangingClient(TrackingMockClient):
+    """An Azure DevOps create that never returns (retry storm, slow-drip response)."""
+
+    started = False
+
+    async def create_work_item_idempotent(self, request: Any) -> Any:
+        self.started = True
+        await asyncio.Event().wait()
+
+
+def test_write_budget_leaves_room_inside_the_lease(svc: ExecutionService) -> None:
+    assert svc.write_budget_seconds == svc.settings.job_lease_seconds * execution_module.WRITE_BUDGET_SHARE
+    assert svc.write_budget_seconds < svc.settings.job_lease_seconds
+
+
+async def test_external_write_over_budget_is_uncertain_and_reconcilable(
+    settings: Settings,
+    session: AsyncSession,
+    factory: Factory,
+    world: World,
+    fresh: Fresh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(execution_module, "WRITE_BUDGET_SHARE", 0.0001)  # 30 ms of a 300 s lease
+    hanging = _HangingClient()
+    lookups = FakeAdo()
+
+    async def factory_fn(s: AsyncSession, actor: Actor) -> Any:
+        return hanging if not hanging.started else await lookups.factory(s, actor)
+
+    svc = ExecutionService(settings, factory_fn)
+    action, _ = await _approved(factory, world)
+    # (wait_for: without the bound this would hang; with it the write is cut off after 30 ms)
+    execution = await asyncio.wait_for(svc.execute(session, world.actor(world.owner), action.id), timeout=10)
+
+    assert (execution.status, execution.error_category) == (E.UNCERTAIN, FailureCategory.AMBIGUOUS)
+    assert execution.error_message is not None
+    assert "outcome is unknown" in execution.error_message
+    assert hanging.closed
+    assert (await _action(fresh, action)).status is S.UNCERTAIN
+    assert not await svc.has_live_execution(session, action)  # recorded, not left "running"
+    reconciled = await svc.reconcile(session, world.actor(world.owner), action.id)  # the tag lookup decides
+    assert reconciled.status is E.FAILED
+    assert (await _action(fresh, action)).status is S.FAILED
 
 
 # ---------------------------------------------------------------------------------------------
