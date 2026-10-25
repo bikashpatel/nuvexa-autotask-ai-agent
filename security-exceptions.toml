@@ -1,0 +1,62 @@
+# Accepted security-scanner exceptions (docs/CI_SECURITY_GATES.md § Exceptions).
+#
+# A scanner result is never suppressed silently: every suppression in the repository cites one of these
+# ids on its line or on the comment line directly above it, and CI (`git ls-files -z | python3
+# scripts/check_security_exceptions.py`) fails when a suppression cites nothing or an unknown id, when an
+# entry is incomplete or no longer cited, and when an entry has expired. Renewing an entry needs a fresh
+# review of the finding, not just a new date.
+
+[[exception]]
+id = "SEC-EX-001"
+scanner = "trivy"
+rule = "HIGH/CRITICAL OS-package CVEs that have no fixed version (audit finding F-10)"
+scope = "backend image base python:3.14-slim-trixie (util-linux libraries, ncurses, systemd libraries, perl-base, libacl)"
+mechanism = "the gating Trivy image scans use --ignore-unfixed; a second, non-gating scan publishes every finding (all severities, fixed or not) in the job summary and the containers-trivy artifact"
+owner = "Platform owner (Elarxsys)"
+justification = "Debian has published no fix; the packages are not used by the application process, which never shells out"
+compensating_controls = "OS security updates applied at build time; image runs as non-root (uid 10001) with read-only application code and no pip; weekly base-image rebuilds via Dependabot; the gate fails as soon as any fix becomes available"
+expires = 2026-12-31
+
+[[exception]]
+id = "SEC-EX-002"
+scanner = "bandit B608 / ruff S608"
+rule = "hardcoded SQL expression (string-built query)"
+scope = "app/integrations/azure_devops/client.py AzureDevOpsClient.find_by_idempotency_tag (WIQL query)"
+mechanism = "inline noqa: S608 and nosec B608 markers on the query line"
+owner = "Backend lead (Elarxsys)"
+justification = "False positive: the string is Azure DevOps WIQL sent to the Azure DevOps REST API, not SQL sent to a database; both interpolated values are escaped by wiql_literal() and the tag must match ^nuvexa-[0-9a-f]{16}$ first"
+compensating_controls = "unit tests for wiql_literal escaping and the tag format (tests/unit/integrations/test_azure_devops_client.py); validate_name() on the project; the query only reads"
+expires = 2027-10-31
+
+[[exception]]
+id = "SEC-EX-003"
+scanner = "semgrep"
+rule = "python.jwt.security.unverified-jwt-decode.unverified-jwt-decode"
+scope = "app/integrations/microsoft_graph/id_token.py IdTokenValidator.validate (tenant pre-read)"
+mechanism = "rule-specific nosemgrep marker on the line above the decode"
+owner = "Backend lead (Elarxsys)"
+justification = "The unverified decode only reads tid to choose that tenant's signing keys and issuer (multi-tenant sign-in); no unverified claim is ever returned or trusted"
+compensating_controls = "the full decode verifies the RS256 signature, issuer bound to that tid, audience, lifetime and required claims; tests reject tokens edited after signing, wrong issuers/tenants and algorithm confusion (tests/security/test_id_token_validation.py); mutation testing covers the module"
+expires = 2027-10-31
+
+[[exception]]
+id = "SEC-EX-004"
+scanner = "semgrep"
+rule = "package_managers.uv.uv-missing-dependency-cooldown.uv-missing-dependency-cooldown (audit finding F-21)"
+scope = "pyproject.toml [tool.uv]"
+mechanism = "rule-specific nosemgrep marker on the line above [tool.uv]"
+owner = "Backend lead (Elarxsys)"
+justification = "Enabling exclude-newer = \"7 days\" today would force 27 locked packages back, including FastAPI 0.162 -> 0.143 across 19 releases; the newest locked release was published on 2026-10-25, so from 2026-11-02 the lock satisfies a 7-day window without downgrades"
+compensating_controls = "Dependabot proposes updates only after a 7-day cooldown (14 days for majors); installs are hash-locked (uv sync --locked); pip-audit gates every change; the full test suite and opt-in E2E run on every update"
+expires = 2026-11-02
+
+[[exception]]
+id = "SEC-EX-005"
+scanner = "gitleaks"
+rule = "jwt, generic-api-key"
+scope = "four synthetic fixtures in tests/unit (two JWT-shaped redaction fixtures, two 64-hex idempotency keys)"
+mechanism = ".gitleaks.toml allowlists, each limited to one rule, one file and one exact line (condition AND)"
+owner = "QA lead (Elarxsys)"
+justification = "Synthetic values that exercise redaction and idempotency; they authenticate nothing and they exist in git history, so they cannot simply be deleted"
+compensating_controls = "every other line in those files, and every other file and commit, is still scanned with the full default rules; tests/security/test_supply_chain_configuration.py rejects imprecise allowlists"
+expires = 2027-10-31

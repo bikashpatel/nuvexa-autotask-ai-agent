@@ -42,3 +42,6 @@ e2e-artifacts/
 # Mutation testing workspace (mutmut)
 mutants/
 .mutmut-cache
+
+# CI/scan reports (scripts/security-scan.sh, layered pytest runs)
+reports/

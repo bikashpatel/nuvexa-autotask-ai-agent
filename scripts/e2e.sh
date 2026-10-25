@@ -40,6 +40,6 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 
-uv sync --group e2e --quiet
+uv sync --locked --group e2e --quiet
 uv run playwright install chromium >/dev/null
 uv run pytest e2e -p no:cacheprovider -o addopts="" -ra "$@"

@@ -43,3 +43,41 @@ def test_each_layer_is_selected_by_its_marker_only(marker: str, own_dir: str, ot
     selected_elsewhere, deselected_elsewhere = _collected(marker, other_dir)
     assert selected_elsewhere == 0
     assert deselected_elsewhere > 0
+
+
+class _FakeItem:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.markers: list[pytest.MarkDecorator] = []
+
+    def add_marker(self, marker: pytest.MarkDecorator) -> None:
+        self.markers.append(marker)
+
+
+def test_a_test_outside_every_layer_directory_fails_collection() -> None:
+    # CI runs the layers as separate steps (-m unit, -m integration, ...); a test that belongs to no
+    # layer would silently run in none of them.
+    from tests import conftest
+
+    root = Path(conftest.__file__).resolve().parent
+    layered = _FakeItem(root / "unit" / "domain" / "test_state_machine.py")
+    stray = _FakeItem(root / "test_stray.py")
+    unknown_dir = _FakeItem(root / "support" / "test_helpers.py")
+    with pytest.raises(pytest.UsageError, match=r"test_stray\.py") as excinfo:
+        conftest.pytest_collection_modifyitems(config=None, items=[layered, stray, unknown_dir])  # type: ignore[arg-type]
+    assert "support/test_helpers.py" in str(excinfo.value)
+    assert "test_state_machine.py" not in str(excinfo.value)
+
+
+def test_items_outside_the_tests_tree_are_left_alone() -> None:
+    from tests import conftest
+
+    root = Path(conftest.__file__).resolve().parent
+    e2e_item = _FakeItem(root.parent / "e2e" / "test_api_system.py")
+    conftest.pytest_collection_modifyitems(config=None, items=[e2e_item])  # type: ignore[arg-type]
+    assert e2e_item.markers == []
+
+
+def test_the_four_layers_together_select_the_whole_suite() -> None:
+    selected, _ = _collected("not (unit or integration or security or evaluation)", "tests")
+    assert selected == 0

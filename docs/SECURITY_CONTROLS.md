@@ -96,3 +96,17 @@ are in `docs/SECURITY_AUDIT.md`; the threat model is in `docs/security-model.md`
 | Locked dependencies (`uv.lock`, `package-lock.json`); CI installs with `--locked` / `npm ci` | CI | `.github/workflows/ci.yml` |
 | Containers run as non-root; OS updates applied at build; pip removed | Dockerfiles | Trivy results in the audit |
 | CI actions pinned to commit SHAs | `ci.yml` | actionlint |
+
+## Supply chain and CI/CD
+
+| Control | Implementation | Tests / gate |
+|---|---|---|
+| Release gates: tests by layer, coverage thresholds, dependency, secret, SAST, image and configuration scans; one required `CI gate` check | `.github/workflows/ci.yml`, `scripts/security-scan.sh` (same commands locally) | `tests/security/test_ci_pipeline_contract.py` (no stage removed, no soft-fail, no threshold lowered) |
+| Exactly one external write path (approval-gated work-item create); reviewed egress inventory; Graph `Mail.Read` only | `ExecutionService._dispatch` → `create_work_item_idempotent` | `tests/security/test_external_write_paths.py` |
+| Scanner suppressions cite registered, expiring exceptions | `security-exceptions.toml`, `scripts/check_security_exceptions.py` | `tests/unit/tooling/test_check_security_exceptions.py`; CI `pipeline-config` |
+| Actions pinned to commit SHAs; base, service and scanner images pinned to digests | workflows, Dockerfiles, Compose, `scripts/security-scan.sh` | `tests/security/test_supply_chain_configuration.py`, zizmor |
+| Read-only workflow token; no secrets reachable from pull-request code; untrusted text only via env | `permissions: contents: read`, `pull_request` trigger | `test_supply_chain_configuration.py`, zizmor, actionlint |
+| Hash-locked installs; 7-day release cooldown (Dependabot, npm); no npm install scripts | `uv.lock` + `--locked`, `.github/dependabot.yml`, `frontend/.npmrc` | `test_supply_chain_configuration.py` |
+| Secret-scan allowlists limited to rule + file + exact line | `.gitleaks.toml` | `test_supply_chain_configuration.py::test_secret_scan_allowlists_are_precise` |
+| SBOMs for Python, npm and both images | `scripts/security-scan.sh sbom`, `images` | CI artifacts |
+

@@ -1,8 +1,11 @@
-# Continuous integration: backend quality gates + tests on PostgreSQL, migration check,
-# frontend lint/typecheck/test/build, and container image builds (never pushed).
+# Continuous integration and release gates — docs/CI_SECURITY_GATES.md describes every stage, the
+# blocking conditions, the exception policy and how to reproduce each job locally.
 #
-# Third-party actions are pinned to full commit SHAs (the comment shows the release tag);
-# Dependabot (.github/dependabot.yml) proposes updates.
+# `CI gate` is the single required status check: it fails unless every gate job passed. Nothing is
+# deployed and no image is pushed. The workflow uses no repository secrets and a read-only token, so
+# pull-request code from anyone can run it safely. Third-party actions are pinned to full commit SHAs
+# (comment = release) and scanner images to digests (scripts/security-scan.sh); Dependabot proposes
+# action updates after a 7-day cooldown. tests/security/test_ci_pipeline_contract.py keeps the gates in.
 
 name: CI
 
@@ -12,6 +15,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      e2e:
+        description: Also run the system end-to-end suite (isolated Compose stack, mock providers, synthetic data)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,6 +27,11 @@ permissions:
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    # bash -eo pipefail: a failing scanner or test in a `| tee` pipeline fails its step.
+    shell: bash
 
 env:
   # Keep in sync with the uv image in Dockerfile and the version that produced uv.lock.
@@ -47,12 +60,12 @@ jobs:
         run: git diff --name-only "origin/${BASE_REF}...HEAD" | python3 scripts/check_test_changes.py
 
   backend:
-    name: Backend (ruff, mypy, pytest on PostgreSQL, migrations)
+    name: Backend (lint, types, migrations, tests by layer on PostgreSQL, coverage gate)
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
         env:
           POSTGRES_USER: nuvexa
           POSTGRES_PASSWORD: nuvexa
@@ -65,7 +78,9 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     env:
+      # Throwaway service container with synthetic data only; never a shared or production database.
       TEST_DATABASE_URL: postgresql+psycopg://nuvexa:nuvexa@localhost:5432/nuvexa_test
+      COVERAGE_FILE: reports/.coverage
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,8 +94,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
-      - name: Install dependencies (locked)
-        run: uv sync --locked
+      - name: Install dependencies (locked, hash-verified)
+        run: |
+          uv sync --locked
+          mkdir -p reports
 
       - name: Ruff lint
         run: uv run ruff check .
@@ -103,21 +120,74 @@ jobs:
           DATABASE_URL: sqlite+aiosqlite:///${{ runner.temp }}/nuvexa-migrations.db
         run: uv run alembic upgrade head
 
-      - name: Tests (PostgreSQL via TEST_DATABASE_URL)
-        # Coverage gate: fail_under in pyproject.toml ([tool.coverage.report]); branch coverage enabled.
-        run: uv run pytest --cov=app --cov-report=xml --cov-report=term
+      # The four layers together are the whole suite (tests/conftest.py rejects tests outside them).
+      - name: Unit tests
+        run: uv run coverage run -m pytest -m unit --junitxml=reports/junit-unit.xml
 
-      - name: Upload coverage report
+      - name: Integration tests (API, worker, LangGraph, PostgreSQL)
+        run: uv run coverage run --append -m pytest -m integration --junitxml=reports/junit-integration.xml
+
+      - name: Security regression tests (invariants, egress inventory, supply chain, pipeline contract)
+        run: uv run coverage run --append -m pytest -m security --junitxml=reports/junit-security.xml
+
+      - name: AI evaluation baseline (offline, synthetic dataset)
+        run: uv run coverage run --append -m pytest -m evaluation --junitxml=reports/junit-evaluation.xml
+
+      - name: Coverage gate (line + branch; fail_under in pyproject.toml)
+        run: uv run coverage report
+
+      - name: Coverage reports
+        if: ${{ !cancelled() }}
+        run: |
+          uv run coverage xml -o reports/coverage.xml
+          uv run coverage html -q -d reports/htmlcov
+          { echo "### Backend coverage — PostgreSQL (files below 100 %)"; uv run coverage report --format=markdown; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test and coverage reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: backend-coverage
-          path: coverage.xml
+          name: backend-postgresql-reports
+          path: reports/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
+
+  backend-sqlite:
+    # The demo mode and the default developer loop run on SQLite; some code paths are dialect-specific.
+    name: Backend tests on SQLite (demo-mode database, coverage gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies (locked, hash-verified)
+        run: uv sync --locked
+
+      - name: Full suite on SQLite with coverage gate
+        run: uv run pytest --cov=app --cov-report=term --cov-report=xml:reports/coverage-sqlite.xml --junitxml=reports/junit-sqlite.xml
+
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-sqlite-reports
+          path: reports/
           if-no-files-found: ignore
           retention-days: 14
 
   frontend:
-    name: Frontend (lint, typecheck, test, build)
+    name: Frontend (format, lint, typecheck, tests with coverage thresholds, build)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -136,8 +206,13 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies (locked)
-        run: npm ci
+      - name: Install dependencies (locked; frontend/.npmrc disables install scripts)
+        run: |
+          echo "npm $(npm --version): ignore-scripts=$(npm config get ignore-scripts) min-release-age=$(npm config get min-release-age)"
+          npm ci
+
+      - name: Format check
+        run: npm run format:check
 
       - name: Lint
         run: npm run lint
@@ -145,14 +220,129 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
+      - name: Tests with coverage thresholds (frontend/vite.config.ts)
+        run: npm run test:coverage -- --reporter=default --reporter=junit --outputFile.junit=reports/junit-frontend.xml
+
+      - name: Coverage summary
+        if: ${{ !cancelled() }}
+        run: |
+          node - >> "$GITHUB_STEP_SUMMARY" <<'JS'
+          const t = require("./coverage/coverage-summary.json").total;
+          const rows = ["statements", "branches", "functions", "lines"].map((k) => `| ${k} | ${t[k].pct} % | ${t[k].covered}/${t[k].total} |`);
+          console.log(["### Frontend coverage", "| metric | covered | count |", "|---|---|---|", ...rows].join("\n"));
+          JS
 
       - name: Build
         run: npm run build
 
-  docker:
-    name: Container images (build only, not pushed)
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-reports
+          path: |
+            frontend/reports/
+            frontend/coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  dependency-audit:
+    name: Dependency audit (pip-audit, npm audit, registry signatures) and SBOMs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies (locked; needed for signature verification)
+        working-directory: frontend
+        run: npm ci
+
+      - name: Known vulnerabilities and registry signatures
+        run: scripts/security-scan.sh deps
+
+      - name: Software bill of materials (CycloneDX)
+        run: scripts/security-scan.sh sbom
+
+      - name: Upload audit results and SBOMs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dependency-audit-and-sbom
+          path: reports/security/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  secret-scan:
+    name: Secret scan (gitleaks, full git history)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: gitleaks over every commit
+        run: scripts/security-scan.sh secrets
+
+      - name: Upload scan results (secrets redacted)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: secret-scan
+          path: reports/security/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  sast:
+    name: Static application security testing (semgrep, bandit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: semgrep and bandit
+        run: scripts/security-scan.sh sast
+
+      - name: Upload SARIF and reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sast
+          path: reports/security/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  containers:
+    name: Container images (build, Trivy vulnerability and secret gate, image SBOMs; never pushed)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -170,6 +360,7 @@ jobs:
           context: .
           file: Dockerfile
           push: false
+          load: true
           tags: nuvexa-backend:ci
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
@@ -180,6 +371,122 @@ jobs:
           context: frontend
           file: frontend/Dockerfile
           push: false
+          load: true
           tags: nuvexa-frontend:ci
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Image metadata
+        run: |
+          mkdir -p reports/security
+          docker image inspect nuvexa-backend:ci nuvexa-frontend:ci \
+            --format '{{json (index .RepoTags 0)}}: {"id": {{json .Id}}, "created": {{json .Created}}, "size": {{.Size}}, "user": {{json .Config.User}}}' \
+            | tee reports/security/image-metadata.txt
+          { echo "### Images (commit ${GITHUB_SHA})"; echo '```'; cat reports/security/image-metadata.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trivy — vulnerabilities and secrets in both images
+        env:
+          IMAGE_TAG: ci
+        run: scripts/security-scan.sh images
+
+      - name: Upload Trivy reports and image SBOMs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: containers-trivy
+          path: reports/security/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  pipeline-config:
+    name: Configuration security (Trivy config, actionlint, zizmor, exception register)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Misconfigurations, workflow security and scanner exceptions
+        env:
+          # Read-only token (permissions: contents: read) for zizmor's online audits, e.g. impostor commits.
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/security-scan.sh config
+
+  e2e:
+    # Opt-in: Actions → CI → Run workflow → "e2e". Uses only the isolated Compose stack with mock providers
+    # and synthetic data — no credentials, no external services, nothing deployed.
+    name: System end-to-end (opt-in)
+    if: github.event_name == 'workflow_dispatch' && inputs.e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install the E2E group and Chromium
+        run: |
+          uv sync --locked --group e2e
+          uv run playwright install --with-deps chromium
+
+      - name: System E2E suite (Compose stack, API black-box, restarts, Playwright UI)
+        run: scripts/e2e.sh --junitxml=reports/junit-e2e.xml
+
+      - name: Upload E2E reports and failure artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-reports
+          path: |
+            reports/
+            e2e-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  ci-gate:
+    # The single required status check for branch protection.
+    name: CI gate
+    if: always()
+    needs:
+      - tdd-guard
+      - backend
+      - backend-sqlite
+      - frontend
+      - dependency-audit
+      - secret-scan
+      - sast
+      - containers
+      - pipeline-config
+      - e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every gate passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          results = {name: job["result"] for name, job in json.loads(os.environ["NEEDS"]).items()}
+          optional = {"tdd-guard", "e2e"}  # tdd-guard runs on pull requests, e2e only when requested
+          blocking = {
+              name: result
+              for name, result in results.items()
+              if result in ("failure", "cancelled") or (result == "skipped" and name not in optional)
+          }
+          for name, result in sorted(results.items()):
+              print(f"{name:18} {result}")
+          if blocking:
+              raise SystemExit(f"Blocked by: {blocking}")
+          PY

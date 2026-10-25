@@ -26,16 +26,20 @@ exactly one layer and layers can be run independently.
 
 | Layer | Location | Select with | Tests (2026-10-25) | Runtime | What it proves |
 |---|---|---|---|---|---|
-| Unit | `tests/unit/` | `uv run pytest -m unit` | 2,615 | ~60 s | Each module in isolation (services, workflow nodes, adapters with respx, agents, schemas, state machine) |
+| Unit | `tests/unit/` | `uv run pytest -m unit` | 2,665 | ~60 s | Each module in isolation (services, workflow nodes, adapters with respx, agents, schemas, state machine) |
 | Integration | `tests/integration/` | `uv run pytest -m integration` | 308 | ~60 s | Real API → services → LangGraph → worker → DB in-process; every endpoint, RBAC matrix, OAuth flows, REST adapters against mocked HTTP |
-| Security | `tests/security/` | `uv run pytest -m security` | 78 | ~5 s | Security invariants and regression tests for every audit finding |
+| Security | `tests/security/` | `uv run pytest -m security` | 139 | ~5 s | Security invariants, regression tests for every audit finding, and release gates: egress inventory / single write path, supply-chain configuration, CI pipeline contract |
 | Evaluation | `tests/evaluation/` | `uv run pytest -m evaluation` | 44 | ~5 s | Offline AI baseline on the labelled synthetic dataset |
 | PostgreSQL | same files | `TEST_DATABASE_URL=postgresql+psycopg://… uv run pytest` | all + `postgres`-marked concurrency tests | ~5–9 min | Triggers, row locks, `SKIP LOCKED`, partial unique indexes, timeouts |
 | Frontend | `frontend/src/**/*.test.ts(x)` | `npm test` / `npm run test:coverage` | 1,167 | ~20 s | Every component/page/hook/API function; a11y (axe); no optimistic writes; XSS inertness |
 | System E2E | `e2e/` | `scripts/e2e.sh` | 37 | ~1–2 min + build | Real containers (nginx, API, worker, PostgreSQL), restarts, DB invariants, Playwright UI |
 
 The default `uv run pytest` runs unit + integration + security + evaluation on SQLite with no network and
-no paid calls. E2E needs Docker and is run separately (and in the opt-in CI job, see the CI/CD gates work).
+no paid calls. E2E needs Docker and is run separately (and in the opt-in CI `e2e` job).
+
+CI runs the four layers as separate steps on PostgreSQL 18 (`coverage run --append -m pytest -m <layer>`, one
+JUnit report each), then enforces the combined coverage gate; a second job runs the whole suite on SQLite.
+Collection fails for a test outside the four layer directories, so no test can fall between the steps.
 
 ## 3. Writing tests
 
@@ -66,11 +70,14 @@ no paid calls. E2E needs Docker and is run separately (and in the opt-in CI job,
 | Mechanism | Where | Effect |
 |---|---|---|
 | Backend coverage gate | `[tool.coverage.report] fail_under = 99` (line + branch, `pyproject.toml`) | `pytest --cov=app` fails below 99 % (measured 99.57 %) |
-| Frontend coverage gate | `frontend/vite.config.ts` thresholds | statements 99, branches 98, functions 100, lines 100 |
+| Frontend coverage gate | `frontend/vite.config.ts` thresholds, `npm run test:coverage` in CI | statements 99, branches 98, functions 100, lines 100 |
 | TDD guard | `scripts/check_test_changes.py`, CI job `tdd-guard` (pull requests) | Fails a PR that changes `app/**.py` or `frontend/src/**.ts(x)` without changing any test. Exception: `TDD-Exempt: <reason>` in the PR description, printed in the log |
 | PR template | `.github/pull_request_template.md` | RED/GREEN evidence, commands and unverified behaviour recorded per change |
 | Layer selection | `tests/conftest.py` + registered markers (`--strict-markers`) | Fast feedback loops per layer |
-| Static checks | ruff (lint + format), mypy strict, ESLint, `tsc` | Required in CI |
+| Static checks | ruff (lint + format), mypy strict, Prettier, ESLint, `tsc` | Required in CI |
+| CI release gates | `.github/workflows/ci.yml`, `scripts/security-scan.sh`, single required check `CI gate` | Dependency, secret, SAST, image and configuration scans block merges (docs/CI_SECURITY_GATES.md) |
+| Pipeline contract | `tests/security/test_ci_pipeline_contract.py` | Fails when a stage is removed, a scanner/test soft-fails, a job leaves the gate, or a coverage threshold is lowered |
+| Exception register | `security-exceptions.toml`, `scripts/check_security_exceptions.py` | Every scanner suppression cites an owned, justified, expiring exception |
 
 ## 5. Mutation testing
 
@@ -118,11 +125,15 @@ item.
 
 ## 8. Baseline and results (2026-10-25)
 
+Scanner and CI-gate results: docs/CI_SECURITY_GATES.md §8.
+
+
 | Measure | Result |
 |---|---|
-| Backend tests, SQLite | 3,028 passed, 12 skipped, 5 strict xfail (English-only injection screener limits) |
-| Backend tests, PostgreSQL 18 | 2,991 passed, 1 skipped, 5 xfail |
-| Backend coverage (line + branch) | 99.57 % |
+| Backend tests, SQLite | 3,143 passed, 12 skipped, 5 strict xfail (English-only injection screener limits) |
+| Backend tests, PostgreSQL 18, layered as in CI | unit 2,659 + integration 308 + security 138 + evaluation 44 = 3,149 passed, 2 skipped, 5 xfail |
+| Backend coverage (line + branch) | 99.57 % (SQLite), 99.61 % (PostgreSQL, combined layers); gate 99 % |
+| CI, Prompt 2 commit `dad3218` (run 40144764111) | PostgreSQL job: 3,038 passed, 2 skipped, 5 xfailed; coverage 99.61 %; all jobs green |
 | Frontend | 1,167 tests; 99.93 % statements, 98.55 % branches, 100 % functions and lines |
 | System E2E | 37 passed |
 | Mutation testing, first run | 2,492 mutants: 2,077 killed, 414 survived, 1 untested — 83.4 %; `state_machine` and `authz` 100 % |

@@ -31,14 +31,21 @@ _LAYER_BY_DIRECTORY = {"unit": "unit", "integration": "integration", "security":
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     tests_root = Path(__file__).resolve().parent
+    layerless: list[str] = []
     for item in items:
         try:
-            layer_dir = Path(str(item.path)).resolve().relative_to(tests_root).parts[0]
-        except ValueError, IndexError:
-            continue
-        layer = _LAYER_BY_DIRECTORY.get(layer_dir)
-        if layer is not None:
+            relative = Path(str(item.path)).resolve().relative_to(tests_root)
+        except ValueError:
+            continue  # outside tests/ (e.g. e2e/), which has its own conftest
+        layer = _LAYER_BY_DIRECTORY.get(relative.parts[0])
+        if layer is None:
+            layerless.append(relative.as_posix())
+        else:
             item.add_marker(getattr(pytest.mark, layer))
+    if layerless:
+        # CI runs each layer as its own step; a test in no layer would silently run in none of them.
+        layers = ",".join(_LAYER_BY_DIRECTORY)
+        raise pytest.UsageError(f"Tests must live under tests/{{{layers}}}/; move: {', '.join(sorted(set(layerless)))}")
 
 
 def make_settings(database_url: str, **overrides: Any) -> Settings:

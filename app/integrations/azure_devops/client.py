@@ -430,7 +430,8 @@ class AzureDevOpsRestClient:
         validate_name(project, what="project")
         # WIQL, not SQL: both literals are escaped by wiql_literal() and the tag is format-checked above.
         query = (
-            "SELECT [System.Id] FROM WorkItems "  # noqa: S608
+            # SEC-EX-002 (security-exceptions.toml): the S608/B608 SQL-injection rules misfire on WIQL.
+            "SELECT [System.Id] FROM WorkItems "  # noqa: S608  # nosec B608
             f"WHERE [System.TeamProject] = {wiql_literal(project)} AND [System.Tags] CONTAINS {wiql_literal(tag)} "
             "ORDER BY [System.Id] ASC"
         )

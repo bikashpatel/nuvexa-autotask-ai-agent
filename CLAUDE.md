@@ -54,6 +54,12 @@ adapters · `app/repositories` tenant-scoped queries · `app/workers` job queue 
     tenant, nonce); never read MSAL's unverified `id_token_claims`.
 12. **TDD:** write the failing test first (see `docs/TESTING_STRATEGY.md`); security changes need negative
     authorization tests in `tests/security/`.
+13. **One external write path.** Only reviewed modules reach external systems and the only write is the
+    approval-gated work-item create (`tests/security/test_external_write_paths.py`). A new egress, a
+    non-GET request or a mail-write scope needs a security review and explicit authorization.
+14. **No silent scanner suppressions.** Every `nosec`/`nosemgrep`/ruff `S…` noqa/allowlist/ignore flag
+    cites a `SEC-EX-NNN` entry in `security-exceptions.toml` (owner, justification, controls, expiry);
+    never weaken a CI gate or threshold (`docs/CI_SECURITY_GATES.md`).
 
 ## Conventions
 

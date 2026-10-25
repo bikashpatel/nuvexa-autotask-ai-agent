@@ -7,6 +7,7 @@ multi-tenant authorities, so the application validates ID tokens itself before t
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from typing import Any
 
@@ -127,6 +128,20 @@ async def test_expiry_within_clock_skew_leeway_is_accepted() -> None:
 async def test_invalid_tokens_are_rejected(description: str, token: Any) -> None:
     with pytest.raises(IdTokenError):
         await validator().validate(token(), nonce="nonce-1")
+
+
+async def test_claims_edited_after_signing_are_rejected_even_for_an_allowed_tenant() -> None:
+    # The validator reads `tid` before verifying, to pick the tenant's keys and issuer
+    # (security-exceptions.toml SEC-EX-003). Editing `tid`/`iss` to another allowed tenant that uses the
+    # same signing key must still fail: only the verified decode's claims are ever returned.
+    header, _, signature = sign(claims()).split(".")
+    forged_claims = claims(tid=OTHER_TENANT, iss=f"{AUTHORITY}/{OTHER_TENANT}/v2.0", oid="victim")
+    forged_payload = jwt.utils.base64url_encode(json.dumps(forged_claims).encode()).decode()
+    forged = f"{header}.{forged_payload}.{signature}"
+    fetcher = FakeJwks(jwks(("k1", SIGNING_KEY)))
+    with pytest.raises(IdTokenError):
+        await validator(fetcher, allowed=[TENANT, OTHER_TENANT]).validate(forged, nonce="nonce-1")
+    assert fetcher.calls == [(OTHER_TENANT, False)]  # the unverified tid only chose which keys to try
 
 
 async def test_wrong_tenant_is_rejected_when_tenants_are_restricted() -> None:

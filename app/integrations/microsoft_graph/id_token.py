@@ -114,6 +114,9 @@ class IdTokenValidator:
     async def validate(self, id_token: str, *, nonce: str | None) -> dict[str, Any]:
         try:
             header = jwt.get_unverified_header(id_token)
+            # Unverified pre-read: `tid` only selects the tenant's signing keys and issuer; every claim that
+            # is returned comes from the verified decode below. SEC-EX-003 (security-exceptions.toml)
+            # nosemgrep: python.jwt.security.unverified-jwt-decode.unverified-jwt-decode
             unverified = jwt.decode(id_token, options={"verify_signature": False})
         except jwt.PyJWTError as exc:
             raise IdTokenError("The ID token is malformed.") from exc

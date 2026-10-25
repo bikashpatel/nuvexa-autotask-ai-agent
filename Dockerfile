@@ -13,13 +13,14 @@
 # Pattern follows https://docs.astral.sh/uv/guides/integration/docker/ (multi-stage, cache mounts,
 # dependencies installed in a separate layer from the project).
 
+# Base images are pinned by tag *and* digest (Dependabot updates both; the digest makes builds reproducible).
 # uv is pinned to the version that produced uv.lock. Bump both together.
-FROM ghcr.io/astral-sh/uv:0.12.1 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
 
 # ---------------------------------------------------------------------------------------------
 # Builder: resolve and install the locked, non-dev dependency set into /app/.venv
 # ---------------------------------------------------------------------------------------------
-FROM python:3.14-slim-trixie AS builder
+FROM python:3.14-slim-trixie@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8 AS builder
 
 COPY --from=uv /uv /uvx /bin/
 
@@ -47,7 +48,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------------------------------------------------------------------------------------------
 # Runtime: same Python base, no uv, no build tooling, non-root user
 # ---------------------------------------------------------------------------------------------
-FROM python:3.14-slim-trixie AS runtime
+FROM python:3.14-slim-trixie@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8 AS runtime
 
 LABEL org.opencontainers.image.title="nuvexa-backend" \
       org.opencontainers.image.description="NUVEXA-AutoTask-AI-Agent API / worker / migrations" \

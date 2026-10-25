@@ -1,10 +1,15 @@
 # Weekly dependency update PRs. Minor/patch updates are grouped per ecosystem to limit noise.
+# Cooldown: a new release is only proposed once it has been public for 7 days (14 for majors), so a
+# compromised or broken release is usually yanked before it reaches a PR. Security updates are not delayed.
 version: 2
 updates:
   - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
     open-pull-requests-limit: 5
     groups:
       python-minor-patch:
@@ -14,6 +19,9 @@ updates:
     directory: /frontend
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
     open-pull-requests-limit: 5
     groups:
       npm-minor-patch:
@@ -23,6 +31,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
         patterns: ["*"]
@@ -32,6 +42,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     ignore:
       # The project requires Python 3.14.x (requires-python = ">=3.14,<3.15"); bump the minor
       # version deliberately, together with pyproject.toml.
@@ -43,12 +55,16 @@ updates:
     directory: /frontend
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
 
   # docker-compose.yml (postgres image).
   - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     ignore:
       - dependency-name: postgres
         update-types: [version-update:semver-major]

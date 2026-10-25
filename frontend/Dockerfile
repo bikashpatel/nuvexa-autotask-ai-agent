@@ -8,25 +8,24 @@
 #   docker build -t nuvexa-frontend frontend
 #   docker run -p 8080:8080 -e API_UPSTREAM=http://host.docker.internal:8000 nuvexa-frontend
 
-ARG NODE_VERSION=24.22.1
-ARG NGINX_VERSION=1.30.6
-
 # ---------------------------------------------------------------------------------------------
-FROM node:${NODE_VERSION}-alpine AS build
+# Base images are pinned by tag and digest; Dependabot (.github/dependabot.yml) updates both.
+FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS build
 WORKDIR /app
 ENV CI=true \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_FUND=false \
     NPM_CONFIG_AUDIT=false
 
-COPY package.json package-lock.json ./
+# .npmrc: ignore-scripts (no install-time code execution) and min-release-age (cooldown).
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 
 COPY . .
 RUN npm run build
 
 # ---------------------------------------------------------------------------------------------
-FROM nginxinc/nginx-unprivileged:${NGINX_VERSION}-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.30.6-alpine@sha256:f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03 AS runtime
 
 LABEL org.opencontainers.image.title="nuvexa-autotask-dashboard" \
       org.opencontainers.image.description="NUVEXA AutoTask (by Elarxsys) web dashboard" \

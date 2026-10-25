@@ -242,10 +242,27 @@ cd frontend && npm ci && npm run lint && npm run typecheck && npm run test:cover
 ```
 
 Tests that call a paid model are marked `live_llm` and excluded by default. Pull requests that change
-production code without changing tests fail the CI `tdd-guard` job. CI
-([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs lint, strict mypy, the test suite on
-PostgreSQL 18, migrations on empty PostgreSQL and SQLite databases, the frontend checks, and builds
-both container images.
+production code without changing tests fail the CI `tdd-guard` job.
+
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) gates every change behind one required check,
+`CI gate`. See [docs/CI_SECURITY_GATES.md](docs/CI_SECURITY_GATES.md) for policies, exceptions and local
+reproduction. It runs:
+
+* lint and strict types;
+* migrations on empty PostgreSQL and SQLite databases;
+* the test layers on PostgreSQL 18, plus the full suite on SQLite, with coverage gates;
+* the frontend checks, with coverage thresholds;
+* pip-audit and npm audit, with SBOMs;
+* gitleaks over the full history;
+* semgrep and bandit;
+* Trivy on both container images and on the configuration;
+* actionlint and zizmor;
+* the scanner-exception register check;
+* the opt-in system E2E suite.
+
+```bash
+scripts/security-scan.sh all      # the CI security scans locally (Docker; pinned scanner images)
+```
 
 ## Security highlights
 
@@ -260,7 +277,10 @@ both container images.
 - **Encrypted tokens:** Microsoft tokens are Fernet-encrypted at rest with rotatable keys, never
   returned to the browser and never logged.
 - **Least privilege:** delegated `Mail.Read` only (no send), Azure DevOps PAT scoped to work items;
-  reply drafts are never sent.
+  reply drafts are never sent. A release gate fails if any new module reaches an external system or
+  any new write path appears.
+- **Supply chain:** pinned actions and images, hash-locked installs, 7-day release cooldown, no npm
+  install scripts, SBOMs, and no silent scanner suppressions (`security-exceptions.toml`).
 - **Idempotency:** unique message ids, one active run per email, one succeeded execution per action,
   Azure DevOps tag lookup before create and after ambiguous failures.
 

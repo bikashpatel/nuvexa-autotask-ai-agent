@@ -44,6 +44,14 @@ dev = [
     "ruff>=0.17.2",
     "mypy>=2.4.0",
     "hypothesis>=6.170.9",
+    "pyyaml>=6.0.3",  # workflow/compose/Dependabot configuration tests (tests/security)
+]
+
+# Security scanners run by CI and scripts/security-scan.sh (`uv run --only-group security …`); locked with
+# hashes like every other dependency, not installed by default.
+security = [
+    "bandit>=1.9.4",
+    "pip-audit>=2.10.1",
 ]
 
 # System end-to-end tests against the Docker Compose stack (`scripts/e2e.sh`); not installed by default.
@@ -58,6 +66,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
+# Release cooldown for uv resolution is not enabled yet: SEC-EX-004 (security-exceptions.toml), expires 2026-11-02.
+# nosemgrep: package_managers.uv.uv-missing-dependency-cooldown.uv-missing-dependency-cooldown
 [tool.uv]
 default-groups = ["dev"]
 

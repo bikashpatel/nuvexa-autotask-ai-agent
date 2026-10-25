@@ -21,6 +21,9 @@
 - [ ] Every confirmed bug has a regression test that failed before the fix
 - [ ] No assertions weakened, tests skipped, files excluded or thresholds lowered to make CI pass
 - [ ] Docs/config updated where behaviour or settings changed
+- [ ] No new scanner suppression without a `SEC-EX-NNN` entry in `security-exceptions.toml`; no gate or
+      threshold weakened (docs/CI_SECURITY_GATES.md)
+- [ ] No new external system access or write path without a security review (`tests/security/test_external_write_paths.py`)
 - [ ] Unverified behaviour (e.g. live Microsoft/LLM calls) is stated below
 
 ## Unverified / risks

@@ -1,0 +1,41 @@
+# gitleaks configuration: the maintained default rules plus four precise allowlists for synthetic test
+# fixtures (security-exceptions.toml SEC-EX-005). Each allowlist matches one rule, one file and one exact
+# line (condition AND), so a real secret anywhere else — including elsewhere in these files — is reported.
+# Line regexes use (?m) because gitleaks matches them against the finding's line within its diff fragment
+# (history scans prefix added lines with '+').
+# Never allowlist a real credential: rotate and revoke it (docs/CI_SECURITY_GATES.md).
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "SEC-EX-005: JWT-shaped log-redaction fixture (header {alg: HS256}, payload {sub: 1234567890}, fake signature)"
+targetRules = ["jwt"]
+condition = "AND"
+paths = ['''^tests/unit/observability/test_logging\.py$''']
+regexTarget = "line"
+regexes = ['''(?m)^\+?JWT = "eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.SflKxwRJSMeKKF2QT4fwpM"$''']
+
+[[allowlists]]
+description = "SEC-EX-005: JWT-shaped audit-redaction fixture (signature segment is base64 of 'signature-sig')"
+targetRules = ["jwt", "generic-api-key"]  # the "access_token" key also triggers the generic rule
+condition = "AND"
+paths = ['''^tests/unit/services/test_audit\.py$''']
+regexTarget = "line"
+regexes = ['''(?m)^\+?        "access_token": "eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.c2lnbmF0dXJlLXNpZw",$''']
+
+[[allowlists]]
+description = "SEC-EX-005: synthetic 64-hex idempotency key (not a credential)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^tests/unit/integrations/test_azure_devops_mapping\.py$''']
+regexTarget = "line"
+regexes = ['''(?m)^\+?KEY = "ABCDEF0123456789" \+ "0" \* 48$''']
+
+[[allowlists]]
+description = "SEC-EX-005: synthetic 64-hex idempotency key (not a credential)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^tests/unit/integrations/test_azure_devops_client\.py$''']
+regexTarget = "line"
+regexes = ['''(?m)^\+?KEY = "0123456789abcdef" \+ "f" \* 48$''']

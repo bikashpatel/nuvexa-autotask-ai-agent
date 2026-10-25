@@ -56,7 +56,11 @@ Microsoft access). Status **Fixed** means a regression test exists and passed af
 | F-18 | Low | Unexpected mailbox-sync exceptions left the checkpoint RUNNING with no audit record | `app/services/email_sync_service.py` | Fixed |
 | F-19 | Low | Malformed workflow resume payloads raised `ValueError` and wedged the graph node | `app/workflows/graph.py`, `engine.py` | Fixed |
 | F-20 | Low | `IntegrationNotConfigured` recorded as INTERNAL instead of CONFIGURATION | `app/services/execution_service.py` | Fixed |
-| F-21 | Low (supply chain) | Dependabot/uv lack a release cooldown | `.github/dependabot.yml`, `pyproject.toml` | Planned in the CI/CD gate work (Prompt 4) |
+| F-21 | Low (supply chain) | Dependabot/uv lack a release cooldown | `.github/dependabot.yml`, `pyproject.toml` | Partly fixed (CI/CD gates): Dependabot 7-day cooldown (14 for majors) and npm `min-release-age=7`; uv `exclude-newer` deferred as SEC-EX-004 (expires 2026-11-02, see `security-exceptions.toml`) |
+| F-22 | Info (accepted) | semgrep `unverified-jwt-decode`: the ID-token validator decodes without verification to read `tid`. Reviewed: the value only selects the tenant's keys and issuer, and only claims from the verified decode are returned. The Prompt 1 semgrep run predates `id_token.py` and did not cover it | `app/integrations/microsoft_graph/id_token.py` | Accepted as SEC-EX-003; regression test for tokens edited after signing (`test_claims_edited_after_signing_are_rejected_even_for_an_allowed_tenant`) |
+| F-23 | Medium (process) | CI ran no dependency, secret, SAST, image or configuration scans, and did not enforce the frontend coverage thresholds or Prettier check (`npm test` only), although `vite.config.ts` said uncovered code "fails CI" | `.github/workflows/ci.yml` | Fixed (docs/CI_SECURITY_GATES.md) |
+| F-24 | Low (supply chain) | Base images, the CI PostgreSQL service and the Compose database image referenced mutable tags; npm ran dependency install scripts; `scripts/e2e.sh` installed the E2E group without `--locked` | Dockerfiles, `ci.yml`, `docker-compose.yml`, `frontend/.npmrc`, `scripts/e2e.sh` | Fixed; pinned by `tests/security/test_supply_chain_configuration.py` |
+| F-25 | Low (test process) | A test outside the four layer directories would have been selected by none of the per-layer CI steps (none existed) | `tests/conftest.py` | Fixed: collection fails for such a test |
 | F-10 | Medium (accepted) | Debian base-image packages with HIGH CVEs and **no fixed version available** (util-linux libs, ncurses, systemd libs, perl-base, libacl) | `python:3.14-slim-trixie` | Accepted with expiry — see §5 |
 
 ### Defects found by the test-hardening work (fixed, each with a regression test)
@@ -110,7 +114,24 @@ All commands were run from the repository root on macOS (arm64), Python 3.14.6, 
 | Database triggers | psql against PostgreSQL 18: `UPDATE`/`DELETE`/`TRUNCATE` on `audit_events` | all rejected; delete allowed only with the purge flag |
 | System E2E | `scripts/e2e.sh` (isolated Compose stack: nginx, API, worker, PostgreSQL 18; Playwright Chromium) | 37 passed (incl. `X-Forwarded-For` spoofing and rate limiting through the proxy, container restarts, DB invariants) |
 
+### Re-verification with the CI/CD gates (2026-10-25)
+
+The scans were re-run with the pinned versions the pipeline uses (`scripts/security-scan.sh`; cooldown-compliant
+scanner releases). Results are in docs/CI_SECURITY_GATES.md §8:
+
+* pip-audit: 136 locked packages, 0 known vulnerabilities.
+* npm audit: 0 vulnerabilities; 294 packages pass registry signature verification.
+* gitleaks: 0 leaks after four precise allowlists.
+* semgrep (1.181.0) and bandit: 0 findings, 2 cited suppressions.
+* Trivy 0.76.0: backend 0 fixable (44 HIGH without a fix, SEC-EX-001), frontend 0.
+* Trivy config, actionlint and zizmor: clean.
+
 ## 5. Accepted risks and exceptions
+
+Scanner exceptions (F-10, F-21 remainder, F-22 and two verified false positives) are maintained in
+[`security-exceptions.toml`](../security-exceptions.toml). Every entry has an owner, justification,
+compensating controls and an expiry date, and CI enforces citation and expiry
+(docs/CI_SECURITY_GATES.md §4). The table below also lists non-scanner risks.
 
 | ID | Risk | Owner | Justification / compensating controls | Expiry |
 |---|---|---|---|---|
@@ -128,4 +149,5 @@ All commands were run from the repository root on macOS (arm64), Python 3.14.6, 
 * No external penetration test, no authenticated DAST scanner (e.g. OWASP ZAP) run, no load testing.
 * No review of the Azure resources a production deployment would use (none were created).
 * GitHub Actions secret-exposure review covered workflow files only; repository settings (branch
-  protection, environment protection rules) are outside this repository and were not inspected.
+  protection, environment protection rules) are outside this repository and were not inspected or
+  changed. docs/CI_SECURITY_GATES.md §6 gives the recommended settings.
