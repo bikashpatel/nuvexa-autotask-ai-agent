@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Date | 2026-10-25 |
-| Code reviewed | branch `prompt5` (verification run on commit `a73afd7` plus test-only commit `005aab9`), on top of `main` `bf19680` |
+| Code reviewed | `main` at `2a66558` (merged from branch `prompt5`; local verification on `a73afd7`/`a5bd61d`, later commits are docs, test assertions and scanner configuration only), previous release `bf19680` |
 | Scope | Backend (FastAPI, LangGraph workflow, worker, PostgreSQL/SQLite), React dashboard, nginx image, CI pipeline |
 | Method | Independent adversarial testing in five areas (AI and data exposure, approval and execution integrity, access control, input and recovery, frontend), fixes test-first, then full regression, scans and system E2E |
 | Recommendation | **READY WITH DOCUMENTED RISKS** — for a supervised pilot with sandbox credentials. **Not** for production mailboxes until the conditions in §10 are met |
@@ -77,7 +77,35 @@ tokens) and Playwright Chromium UI flows.
 
 ### 2.3 Mutation testing
 
-_Pending — filled in from the final run._
+`uv run --with mutmut mutmut run --max-children 8` on the security-critical modules (`state_machine`, `authz`,
+`approval_service`, `execution_service`, `action_policy`, `id_token`), 17 minutes, macOS:
+
+| Result | Mutants |
+|---|---|
+| Killed | 2,334 → **2,336** after two follow-up assertions (below) |
+| Survived | 168 → 166 |
+| Inconclusive ("segfault": the forked test process crashed) | 164 — 102 in `execution_service`, 31 each in `approval_service` and `action_policy`; mostly mutants of locking/transaction arguments (e.g. `for_update`). Not counted as detected |
+| No test | 1 |
+| **Score** | **93.3 %** of conclusive mutants (2,336 / 2,503); 87.6 % if every inconclusive mutant is counted as undetected (previous release review: 87.8 %) |
+
+`state_machine` and `authz`: no survivors. Triage of survivors (sampled diffs):
+
+* `id_token` (80): error-message wording only (`IdTokenError(None)`, changed case) — accepted; tests assert error
+  types and categories, not text.
+* Services (86): database-lock mutants (`for_update` flipped; only observable on PostgreSQL, covered by the
+  PostgreSQL concurrency tests), equivalent mutants and unreachable defaults, message wording, and a few
+  audit-detail fields that no test asserts (`resource_id` on some reject/supersede/repair events) — low.
+* Two real gaps, now closed with assertions (`8e010c5`): reconciliation building the Azure DevOps client without
+  the acting user (their delegated token), and the crashed attempt losing its `ambiguous` category.
+
+Uncertainty: the inconclusive mutants should be re-classified on Linux (fork behaviour differs on macOS).
+
+### 2.4 CI (GitHub Actions)
+
+| Run | Commit | Result |
+|---|---|---|
+| [40166551446](https://github.com/bikashpatel/nuvexa-autotask-ai-agent/actions/runs/40166551446) | `ee6503f` | **Blocked by the secret scan** — this report quoted a secret-shaped synthetic fixture (§5); cancelled when the fix was pushed |
+| [40167197528](https://github.com/bikashpatel/nuvexa-autotask-ai-agent/actions/runs/40167197528) | `2a66558` | **All gates green**, `CI gate` passed. PostgreSQL layers: unit 3,217 (1 skipped, 5 strict xfail), integration 310, security 445 (2 skipped), evaluation 44; coverage gate passed (8,141 statements / 13 missed, 1,730 branches / 17 partial); SQLite suite, frontend, dependency audit, secret scan, SAST, container and configuration scans all passed |
 
 ## 3. Coverage
 
