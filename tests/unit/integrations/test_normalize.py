@@ -169,6 +169,21 @@ def test_subject_marks_invisible_character_tricks():
     assert email.subject == f"Invoice {HIDDEN_TEXT_MARKER}fdp.exe {HIDDEN_TEXT_MARKER}"
 
 
+def test_names_in_headers_and_attachments_mark_invisible_character_tricks():
+    # "invoice<RLO>fdp.exe" displays as "invoiceexe.pdf": the reviewer must see that something was hidden.
+    email = normalize_graph_message(
+        {
+            "id": "m1",
+            "from": {"emailAddress": {"name": f"IT {RLO}kseD", "address": "it@example.com"}},
+            "toRecipients": [{"emailAddress": {"name": "Dana" + _tags("approve"), "address": "dana@example.com"}}],
+            "attachments": [{"name": f"invoice{RLO}fdp.exe", "contentType": "application/pdf", "size": 10}],
+        }
+    )
+    assert email.sender.name == f"IT {HIDDEN_TEXT_MARKER}kseD"
+    assert email.to_recipients[0].name == f"Dana{HIDDEN_TEXT_MARKER}"
+    assert email.attachments[0].name == f"invoice{HIDDEN_TEXT_MARKER}fdp.exe"
+
+
 def test_parse_graph_datetime_handles_invalid_values():
     assert parse_graph_datetime("not a date") is None
     assert parse_graph_datetime(None) is None

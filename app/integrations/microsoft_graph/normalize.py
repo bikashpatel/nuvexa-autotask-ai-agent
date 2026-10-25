@@ -93,7 +93,10 @@ def _address(recipient: Any) -> EmailAddress | None:
     inner = recipient.get("emailAddress")
     if not isinstance(inner, Mapping):
         return None
-    name = _clip(normalize_text(inner["name"]) if isinstance(inner.get("name"), str) else None, _MAX_NAME)
+    # Display names and attachment names are shown to reviewers: keep a visible marker where tricks were removed.
+    name = _clip(
+        normalize_text(inner["name"], mark_hidden=True) if isinstance(inner.get("name"), str) else None, _MAX_NAME
+    )
     address = _token(inner.get("address"), _MAX_NAME)
     if name is None and address is None:
         return None
@@ -114,7 +117,7 @@ def _attachments(value: Any) -> list[AttachmentMeta]:
     for item in value[:_MAX_ATTACHMENTS]:
         if not isinstance(item, Mapping):
             continue
-        name = _clip(normalize_text(item["name"]) if isinstance(item.get("name"), str) else None, 255)
+        name = _clip(normalize_text(item["name"], mark_hidden=True) if isinstance(item.get("name"), str) else None, 255)
         size = item.get("size")
         result.append(
             AttachmentMeta(
