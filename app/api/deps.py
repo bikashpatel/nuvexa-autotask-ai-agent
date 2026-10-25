@@ -128,5 +128,5 @@ async def _limit_identity(request: Request, settings: Settings, db: Database, pe
         async with db.session() as session:
             resolved = await SessionService(settings).resolve(session, token)
         if resolved is not None:
-            return f"user:{resolved.user.id}"
-    return f"ip:{client_ip(request) or 'unknown'}"
+            return ":".join(("user", str(resolved.user.id)))
+    return ":".join(("ip", client_ip(request) or "unknown"))
