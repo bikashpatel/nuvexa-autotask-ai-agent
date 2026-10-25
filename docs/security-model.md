@@ -134,7 +134,7 @@ LLM output crosses the boundary only after Pydantic validation **and** policy va
     authenticated routes **fail open** (session just verified; RBAC, approval binding and idempotency
     still apply); both are logged as `rate_limit_backend_unavailable` without key or IP.
 * Security headers (CSP on the frontend, `X-Content-Type-Options`, `Referrer-Policy`,
-  `X-Frame-Options: DENY`).
+  `X-Frame-Options: DENY`, `Strict-Transport-Security` for a year: the Container Apps ingress adds none).
 * CORS disabled by default (same-origin through the reverse proxy); explicit allow-list otherwise.
 
 ### Logging and telemetry

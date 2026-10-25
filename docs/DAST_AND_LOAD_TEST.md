@@ -103,8 +103,9 @@ inclusion, external redirect, cross-domain misconfiguration, cloud-metadata acce
 hidden files, and the missing-header rules (anti-clickjacking, X-Content-Type-Options, CSP): every response,
 including errors and the proxied API, carries the nginx security headers. Not raised because the stack speaks
 plain HTTP: the Secure-cookie and HSTS rules. Production sets `Secure` cookies (settings validation refuses
-`COOKIE_SECURE=false` in production); HSTS is left to the TLS terminator (comment in `frontend/nginx.conf`),
-which [deployment.md](deployment.md) does not mention yet — verify both on the real ingress.
+`COOKIE_SECURE=false` in production). HSTS was left to the TLS terminator, but the Container Apps ingress
+in `infra/azure/` adds none; after this scan nginx sends `Strict-Transport-Security: max-age=31536000;
+includeSubDomains` on every response (browsers ignore it over plain HTTP). Verify both on the real ingress.
 
 ### 2.5 What the DAST does not show
 
@@ -256,8 +257,8 @@ None. The recommendation in [RELEASE_READINESS_REPORT.md](RELEASE_READINESS_REPO
 documented risks for a supervised pilot) stands. Items to carry into the report: DAST and a load smoke test
 have now been performed (§7 "Not performed" can be narrowed to penetration, soak and production-like load
 testing); the open recommendation to return 409 instead of 500 for an unconfigured Microsoft sign-in; any
-shared demo should not run the `development` profile (§2.5); and HSTS and `Secure` cookies are to be
-verified on the real TLS ingress.
+shared demo should not run the `development` profile (§2.5); and HSTS (now sent by nginx) and `Secure`
+cookies are to be verified on the real TLS ingress.
 
 ## 6. Tools and versions
 

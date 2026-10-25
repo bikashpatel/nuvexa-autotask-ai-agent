@@ -33,6 +33,7 @@ SECURITY_HEADERS = (
     "referrer-policy",
     "x-frame-options",
     "permissions-policy",
+    "strict-transport-security",
 )
 
 
@@ -257,6 +258,18 @@ def test_permissions_policy_disables_powerful_features(server: Directive) -> Non
     features = dict(item.split("=", 1) for item in value.split(","))
     for feature in ("camera", "microphone", "geolocation", "payment", "usb"):
         assert features.get(feature) == "()", f"{feature} must be disabled"
+
+
+def test_hsts_is_sent_for_a_year_without_preload(server: Directive) -> None:
+    # The only public ingress (Azure Container Apps, infra/azure/main.bicep) terminates TLS and adds no HSTS, so
+    # nginx sends it. Browsers ignore HSTS received over plain HTTP (RFC 6797 §8.1), so local HTTP stacks are
+    # unaffected. No `preload`: submitting to browser preload lists is a decision for the domain owner.
+    directives = dict(
+        item.strip().partition("=")[::2]
+        for item in _server_headers(server)["strict-transport-security"].args[1].lower().split(";")
+    )
+    assert int(directives["max-age"]) >= 31_536_000
+    assert "preload" not in directives
 
 
 def test_no_location_or_if_block_drops_the_inherited_security_headers(config: list[Directive]) -> None:

@@ -258,7 +258,7 @@ TypeScript 7 — fails the gates on its own).
 | Azure DevOps create, `validateOnly`, WIQL lookup and reconcile with a PAT and with delegated tokens (incl. the area-path read question above) | sandbox organization/project | real error bodies (identifier allow-list), tag lookup latency, permissions |
 | LLM providers (`@pytest.mark.live_llm`): OpenAI and Azure OpenAI (key and Entra ID), structured outputs, content filters, 401/429/5xx | test API keys / deployment | real response shapes, the new `with_raw_response` path, categories |
 | OTLP trace export to a real collector | collector | transport/auth (span content is sanitized and tested offline with the real instrumentors) |
-| Deployment (Azure Container Apps or similar), TLS, HSTS at the ingress, managed identity | cloud subscription (not authorized) | runtime configuration |
+| Deployment (Azure Container Apps or similar), TLS, HSTS and `Secure` cookies as seen through the real ingress, managed identity | cloud subscription (not authorized) | runtime configuration |
 
 All of these are exercised offline against faithful fakes (MSAL behaviour, signed ID tokens, respx/httpx2
 mock transports); fakes cannot prove provider behaviour.
