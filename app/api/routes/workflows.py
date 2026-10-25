@@ -66,7 +66,7 @@ async def list_runs(
 
 
 @router.get("/{run_id}", response_model=WorkflowDetail)
-async def get_run(run_id: uuid.UUID, actor: ActorDep, session: SessionDep) -> WorkflowDetail:
+async def get_run(run_id: uuid.UUID, actor: ActorDep, session: SessionDep, settings: SettingsDep) -> WorkflowDetail:
     run = await _run(session, actor, run_id)
     email = await session.get(EmailMessage, run.email_message_id)
     analysis = await _latest_analysis(session, run)
@@ -93,7 +93,7 @@ async def get_run(run_id: uuid.UUID, actor: ActorDep, session: SessionDep) -> Wo
     return WorkflowDetail(
         run=run_out(run, email.subject if email else None),
         analysis=AnalysisOut.model_validate(analysis) if analysis else None,
-        actions=[await action_out(session, actor, a) for a in actions],
+        actions=[await action_out(session, actor, a, settings=settings) for a in actions],
         events=[WorkflowEventOut.model_validate(e) for e in events],
     )
 
@@ -108,7 +108,9 @@ async def get_analysis(run_id: uuid.UUID, actor: ActorDep, session: SessionDep) 
 
 
 @router.get("/{run_id}/actions", response_model=list[ActionOut])
-async def get_actions(run_id: uuid.UUID, actor: ActorDep, session: SessionDep) -> list[ActionOut]:
+async def get_actions(
+    run_id: uuid.UUID, actor: ActorDep, session: SessionDep, settings: SettingsDep
+) -> list[ActionOut]:
     run = await _run(session, actor, run_id)
     actions = (
         (
@@ -121,7 +123,7 @@ async def get_actions(run_id: uuid.UUID, actor: ActorDep, session: SessionDep) -
         .scalars()
         .all()
     )
-    return [await action_out(session, actor, a) for a in actions]
+    return [await action_out(session, actor, a, settings=settings) for a in actions]
 
 
 @router.get("/{run_id}/events", response_model=list[WorkflowEventOut])

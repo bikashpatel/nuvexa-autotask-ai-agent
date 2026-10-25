@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base import AgentOutputError, AgentProviderError
@@ -29,7 +29,7 @@ from app.workers import queue, runner
 from app.workers.runner import JobHandlers, Worker, _is_retryable, worker_context
 from app.workflows.engine import WorkflowEngine
 from tests.conftest import UserFactory, make_settings
-from tests.unit.workers.conftest import JobFactory, reload_job
+from tests.unit.workers.conftest import JobFactory, RecordingLog, reload_job
 from tests.unit.workflows.fakes import FakeAgentWithClose, add_account, add_email, add_run
 
 
@@ -343,21 +343,75 @@ async def test_heartbeat_refreshes_lease_and_survives_errors(
     calls = {"n": 0}
     real = queue.heartbeat
 
-    async def flaky(session: AsyncSession, job_id: uuid.UUID) -> None:
+    async def flaky(session: AsyncSession, held: Job) -> bool:
         calls["n"] += 1
         if calls["n"] == 1:
             raise ConnectionError("db blip")
-        await real(session, job_id)
+        return await real(session, held)
 
     monkeypatch.setattr(runner.queue, "heartbeat", flaky)
     worker = _worker(db, make_settings(database_url, job_lease_seconds=60), FakeHandlers())
-    task = asyncio.create_task(worker._heartbeat(job.id))
+    task = asyncio.create_task(worker._heartbeat(job))
     await _wait_until(lambda: calls["n"] >= 3)
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
     assert fake.sleeps[0] == 20.0  # lease / 3
     assert (await reload_job(db, job)).locked_at > old  # type: ignore[operator]
+
+
+async def test_heartbeat_stops_once_the_lease_was_lost(
+    db: Database, add_job: JobFactory, monkeypatch: pytest.MonkeyPatch, database_url: str
+) -> None:
+    fake = _AsyncioWithFakeSleep()
+    monkeypatch.setattr(runner, "asyncio", fake)
+    old = utcnow() - timedelta(minutes=30)
+    job = await add_job(status=JobStatus.RUNNING, attempts=1, locked_by="me", locked_at=old)
+    async with db.session() as s:  # the lease was recovered and another worker claimed the job
+        await s.execute(update(Job).where(Job.id == job.id).values(locked_by="other", attempts=2))
+        await s.commit()
+    worker = _worker(db, make_settings(database_url, job_lease_seconds=60), FakeHandlers())
+    await asyncio.wait_for(worker._heartbeat(job), timeout=5)  # returns instead of beating forever
+    assert fake.sleeps == [20.0]
+    assert (await reload_job(db, job)).locked_at == old  # the other holder's lease was not touched
+
+
+async def _taken_over(db: Database, job: Job) -> None:
+    """While `job` runs, its lease expires and another worker claims it (attempt 2)."""
+    async with db.session() as s:
+        await s.execute(update(Job).where(Job.id == job.id).values(locked_by="other", attempts=job.attempts + 1))
+        await s.commit()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_run_job_leaves_a_job_alone_once_another_worker_holds_it(
+    db: Database, settings: Settings, add_job: JobFactory, fails: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = RecordingLog()
+    monkeypatch.setattr(runner, "log", log)
+    monkeypatch.setattr(queue, "log", log)
+    handlers = FakeHandlers()
+    handlers.gate = asyncio.Event()
+    worker = _worker(db, settings, handlers)
+    job = await add_job(max_attempts=3)
+    if fails:
+        handlers.errors[job.id] = ValueError("late")
+    claimed = await _claim(db, worker)
+    task = asyncio.create_task(worker.run_job(claimed))
+    await handlers.started.wait()
+    await _taken_over(db, claimed)
+    handlers.gate.set()
+    await task
+    stored = await reload_job(db, job)
+    assert (stored.status, stored.locked_by, stored.attempts, stored.result) == (JobStatus.RUNNING, "other", 2, {})
+    [lost] = log.named("job_lease_lost")
+    assert (lost["operation"], lost["attempt"]) == ("fail" if fails else "complete", 1)
+    if fails:
+        [failed] = log.named("job_failed")
+        assert failed["status"] == "lease_lost"
+    else:
+        assert len(log.named("job_result_discarded")) == 1
+        assert log.named("job_succeeded") == []
 
 
 async def test_heartbeat_interval_has_a_floor(db: Database, monkeypatch: pytest.MonkeyPatch, database_url: str) -> None:

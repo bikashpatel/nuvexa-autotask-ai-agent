@@ -6,7 +6,7 @@ import uuid
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import literal_column, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import Settings
@@ -16,7 +16,7 @@ from app.db.models import Job, Tenant
 from app.db.session import Database
 from app.domain.enums import JobStatus, JobType
 from app.workers import queue
-from tests.unit.workers.conftest import JobFactory, reload_job
+from tests.unit.workers.conftest import JobFactory, RecordingLog, reload_job
 
 PURGE = JobType.RETENTION_PURGE
 
@@ -177,13 +177,15 @@ async def test_concurrency_key_blocks_while_a_job_runs(db: Database, add_job: Jo
     second = await add_job(concurrency_key="run:1", run_after_offset=-1)
     unrelated = await add_job(concurrency_key=None)
     async with db.session() as s:
-        assert (await queue.claim_next(s, "w")).id == first.id  # type: ignore[union-attr]
+        claimed = await queue.claim_next(s, "w")
+    assert claimed is not None
+    assert claimed.id == first.id
     async with db.session() as s:
         assert (await queue.claim_next(s, "w")).id == unrelated.id  # type: ignore[union-attr]
     async with db.session() as s:
         assert await queue.claim_next(s, "w") is None  # second is blocked by first
     async with db.session() as s:
-        await queue.complete(s, first.id)
+        assert await queue.complete(s, claimed)
     async with db.session() as s:
         assert (await queue.claim_next(s, "w")).id == second.id  # type: ignore[union-attr]
 
@@ -225,13 +227,13 @@ async def test_claim_race_on_concurrency_key_returns_none(db: Database, add_job:
 async def test_complete(db: Database, add_job: JobFactory) -> None:
     job = await add_job(status=JobStatus.RUNNING, locked_by="w")
     async with db.session() as s:
-        await queue.complete(s, job.id, {"inserted": 3})
+        assert await queue.complete(s, job, {"inserted": 3}) is True
     stored = await reload_job(db, job)
     assert (stored.status, stored.result, stored.locked_by) == (JobStatus.SUCCEEDED, {"inserted": 3}, None)
     assert stored.finished_at is not None
     other = await add_job(status=JobStatus.RUNNING)
     async with db.session() as s:
-        await queue.complete(s, other.id)
+        assert await queue.complete(s, other) is True
     assert (await reload_job(db, other)).result == {}
 
 
@@ -282,10 +284,97 @@ async def test_heartbeat_refreshes_running_jobs_only(db: Database, add_job: JobF
     running = await add_job(status=JobStatus.RUNNING, locked_at=old)
     done = await add_job(status=JobStatus.SUCCEEDED, locked_at=old)
     async with db.session() as s:
-        await queue.heartbeat(s, running.id)
-        await queue.heartbeat(s, done.id)
+        assert await queue.heartbeat(s, running) is True
+        assert await queue.heartbeat(s, done) is False
     assert (await reload_job(db, running)).locked_at > old  # type: ignore[operator]
     assert (await reload_job(db, done)).locked_at == old
+
+
+async def _claimed_then_taken_over(db: Database, add_job: JobFactory, *, by: str) -> tuple[Job, Job]:
+    """Worker "a" claims a job and stalls; its lease is recovered and `by` claims the job again."""
+    await add_job(concurrency_key="run:fence")
+    async with db.session() as s:
+        stale = await queue.claim_next(s, "a")
+    assert stale is not None
+    async with db.session() as s:
+        await s.execute(update(Job).values(locked_at=utcnow() - timedelta(seconds=400)))
+        await s.commit()
+        assert await queue.recover_expired_leases(s, 300) == 1
+    async with db.session() as s:
+        current = await queue.claim_next(s, by)
+    assert current is not None
+    assert (current.id, current.attempts) == (stale.id, 2)
+    return stale, current
+
+
+@pytest.mark.parametrize("by", ["b", "a"])  # another worker, or the same worker id on a later attempt
+@pytest.mark.parametrize("operation", ["complete", "fail_retryable", "fail_final", "heartbeat"])
+async def test_a_stale_lease_holder_cannot_release_or_extend_the_current_lease(
+    db: Database, add_job: JobFactory, operation: str, by: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale, current = await _claimed_then_taken_over(db, add_job, by=by)
+    before = await reload_job(db, current)
+    log = RecordingLog()
+    monkeypatch.setattr(queue, "log", log)
+    async with db.session() as s:
+        match operation:
+            case "complete":
+                assert await queue.complete(s, stale, {"by": "a"}) is False
+            case "fail_retryable":
+                assert await queue.fail(s, stale, "late", retryable=True) is None
+            case "fail_final":
+                assert await queue.fail(s, stale, "late", retryable=False) is None
+            case "heartbeat":
+                assert await queue.heartbeat(s, stale) is False
+    after = await reload_job(db, current)
+    assert (after.status, after.locked_by, after.locked_at, after.attempts) == (
+        JobStatus.RUNNING,
+        by,
+        before.locked_at,
+        2,
+    )
+    assert (after.result, after.last_error, after.finished_at) == ({}, "lease expired; re-queued", None)
+    [lost] = log.named("job_lease_lost")
+    assert (lost["operation"], lost["worker_id"], lost["attempt"]) == (operation.split("_", maxsplit=1)[0], "a", 1)
+    async with db.session() as s:  # the current holder's lease is intact: nothing else can claim the key
+        assert await queue.claim_next(s, "c") is None
+    async with db.session() as s:  # and the current holder still releases normally
+        assert await queue.complete(s, current, {"by": by}) is True
+    assert (await reload_job(db, current)).status is JobStatus.SUCCEEDED
+
+
+async def _future_job(db: Database, add_job: JobFactory, **fields: object) -> Job:
+    """A job row whose job_type a newer release added (this version cannot decode it)."""
+    job = await add_job(run_after_offset=-60, **fields)
+    async with db.session() as s:
+        await s.execute(update(Job).where(Job.id == job.id).values(job_type=literal_column("'send_weekly_digest'")))
+        await s.commit()
+    return job
+
+
+async def test_claim_skips_job_types_this_version_cannot_decode(db: Database, add_job: JobFactory) -> None:
+    future = await _future_job(db, add_job)
+    known = await add_job()
+    async with db.session() as s:
+        claimed = await queue.claim_next(s, "w")
+    assert claimed is not None
+    assert claimed.id == known.id
+    async with db.session() as s:
+        assert await queue.claim_next(s, "w") is None
+        kept = (await s.execute(select(Job.status, Job.attempts).where(Job.id == future.id))).one()
+    assert tuple(kept) == (JobStatus.QUEUED, 0)  # left for a worker that knows the type
+
+
+async def test_lease_recovery_skips_job_types_this_version_cannot_decode(db: Database, add_job: JobFactory) -> None:
+    expired = utcnow() - timedelta(seconds=400)
+    future = await _future_job(db, add_job, status=JobStatus.RUNNING, attempts=1, locked_by="new", locked_at=expired)
+    known = await add_job(status=JobStatus.RUNNING, attempts=1, locked_by="old", locked_at=expired)
+    async with db.session() as s:
+        assert await queue.recover_expired_leases(s, 300) == 1
+    assert (await reload_job(db, known)).status is JobStatus.QUEUED
+    async with db.session() as s:
+        kept = (await s.execute(select(Job.status, Job.locked_by).where(Job.id == future.id))).one()
+    assert tuple(kept) == (JobStatus.RUNNING, "new")  # recovered by the newer release's workers
 
 
 async def test_recover_expired_leases(db: Database, add_job: JobFactory) -> None:

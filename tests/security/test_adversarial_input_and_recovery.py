@@ -550,10 +550,7 @@ async def test_nul_characters_in_review_text_are_rejected_or_removed(harness: Ha
 # ===================================================================================================
 
 
-# DEFECT: when the database fails while recording the outcome of a successful work-item create, the job is
-# retried within the execution lease, the retry's Conflict ("already executing") is swallowed by the engine
-# fallback and the job SUCCEEDS; afterwards no path recovers the action: reconcile accepts only UNCERTAIN,
-# execute/cancel/re-analysis refuse EXECUTING. The action and run stay "executing" forever.
+# Regression (Prompt 5): an orphaned "executing" action (stale execution lease) can be reconciled to its outcome.
 async def test_db_failure_after_a_successful_work_item_create_is_recoverable(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -596,9 +593,7 @@ async def test_db_failure_after_a_successful_work_item_create_is_recoverable(
     assert sum(c.create_attempts for c in harness.ado.clients) == 1  # never re-sent
 
 
-# DEFECT: a job row this worker version cannot decode (a JobType added by a newer release during a rolling deploy,
-# or a damaged row) makes claim_next raise LookupError while loading it. The row stays QUEUED at the head of the
-# queue, so every claim fails: run_once raises and run_forever logs job_claim_failed forever — no job runs at all.
+# Regression (Prompt 5): a job row of an unknown job_type is skipped (left queued for a newer worker), not loaded.
 async def test_an_undecodable_job_row_does_not_block_the_queue(harness: Harness) -> None:
     member = await harness.persona("member")
     async with harness.db.session() as s:
@@ -615,6 +610,9 @@ async def test_an_undecodable_job_row_does_not_block_the_queue(harness: Harness)
     [sync_job] = await jobs_of(harness, JobType.SYNC_MAILBOX)
     assert sync_job.status is JobStatus.SUCCEEDED
     assert processed >= 1
+    async with harness.db.session() as s:  # the row is kept, still queued, for a worker that can decode it
+        kept = (await s.execute(select(Job.status, Job.attempts).where(Job.id == future.id))).one()
+    assert tuple(kept) == (JobStatus.QUEUED, 0)
 
 
 async def _job_taken_over_after_lease_expiry(db: Database, lease_seconds: int) -> tuple[Job, Job]:
@@ -638,9 +636,7 @@ async def _job_taken_over_after_lease_expiry(db: Database, lease_seconds: int) -
     return stale, current
 
 
-# DEFECT: complete()/fail() are not fenced by the lease holder (`locked_by`/attempt): a stalled worker whose lease
-# was recovered can finish or re-queue the job another worker is running, after which a third worker can claim it
-# while B still runs it — two concurrent runs of one concurrency key (one workflow run), against queue.py's contract.
+# Regression (Prompt 5): complete()/fail() are fenced by the lease holder (`locked_by` + attempt): no-op when stale.
 @pytest.mark.parametrize("outcome", ["complete", "fail"])
 async def test_a_stale_worker_cannot_release_a_job_another_worker_now_holds(
     db: Database, settings: Any, outcome: str
@@ -648,9 +644,9 @@ async def test_a_stale_worker_cannot_release_a_job_another_worker_now_holds(
     stale, _current = await _job_taken_over_after_lease_expiry(db, settings.job_lease_seconds)
     async with db.session() as s:
         if outcome == "complete":
-            await queue.complete(s, stale.id, {"by": "worker-a"})
+            assert await queue.complete(s, stale, {"by": "worker-a"}) is False
         else:
-            await queue.fail(s, stale, "late failure from worker-a", retryable=True)
+            assert await queue.fail(s, stale, "late failure from worker-a", retryable=True) is None
     async with db.session() as s:
         row = await s.get(Job, stale.id)
         assert row is not None
@@ -762,10 +758,7 @@ def _fail_commit_once_when(monkeypatch: pytest.MonkeyPatch, event_type: str) -> 
     return failed
 
 
-# DEFECT (SQLite / demo mode only): create_run's `begin_nested()` is the first write of the request, so pysqlite
-# commits it on RELEASE. When the request then fails (here: the final COMMIT), the email update and the analysis
-# job roll back but the RECEIVED run survives without a job. Every later "Analyze" returns that run
-# (200, created=false, job_id=null) and nothing ever runs it. PostgreSQL rolls the run back (this test passes there).
+# Regression (Prompt 5): on SQLite a savepoint that is a request's first write now rolls back with the request.
 async def test_failed_analysis_request_leaves_no_orphan_run(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     member = await synced_member(harness)
     email_id = await email_id_by_provider_id(harness, member.user_id, INCIDENT_ID)
@@ -789,9 +782,7 @@ async def test_failed_analysis_request_leaves_no_orphan_run(harness: Harness, mo
     assert run["status"] == "pending_approval", "the analysis was never queued"
 
 
-# DEFECT (SQLite / demo mode only): same root cause on the write path. queue_execution's enqueue is the request's
-# first write, so the execute job is committed even though the request fails and the user gets a 500: the work
-# item is created anyway and the trail lacks its `execute_requested` audit event. PostgreSQL rolls it back.
+# Regression (Prompt 5): on SQLite a failed execute request no longer leaves its (savepoint-inserted) job behind.
 async def test_failed_execute_request_queues_nothing(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     member = await synced_member(harness)
     action = await _work_item(harness, member)
@@ -846,10 +837,7 @@ async def test_transient_error_during_auto_analysis_does_not_skip_new_emails(
     assert stuck == []
 
 
-# DEFECT (low): cancelling a run whose analysis FAILED (job FAILED/DEAD, graph parked before the failed node)
-# never runs `finalize`: the cancel resume falls back to sync_run_status, which returns early for CANCELLED runs.
-# The run is CANCELLED but completed_at stays NULL and there is no finalize event / workflow_finished audit event,
-# unlike every other cancellation path.
+# Regression (Prompt 5): a cancel resume re-runs the parked failed node, which halts, so the graph finalizes the run.
 async def test_cancelling_a_failed_analysis_finalizes_the_run(make_harness: HarnessFactory) -> None:
     h = await make_harness(agent=ScriptedAgent({"extract": [AgentOutputError("schema-invalid output")]}))
     member = await synced_member(h)
@@ -914,9 +902,7 @@ async def test_graph_mail_client_uses_bounded_timeouts_and_never_follows_redirec
     assert timeout == {"connect": 7.5, "read": 7.5, "write": 7.5, "pool": 7.5}
 
 
-# DEFECT (low, observability): the engine fallback logs the reason a queued execute/reconcile was dropped as
-# `code=exc.code`, but the redaction processor masks every key named `code` (OAuth authorization codes), so the
-# only trace says `code=[REDACTED]`. Same pattern: app/api/errors.py (`app_error`), app/api/routes/auth.py.
+# Regression (Prompt 5): the engine fallback logs `error_code=` (a key named `code` is redacted as an OAuth code).
 async def test_dropped_execution_requests_are_logged_with_an_actionable_reason(
     harness: Harness, caplog: pytest.LogCaptureFixture
 ) -> None:

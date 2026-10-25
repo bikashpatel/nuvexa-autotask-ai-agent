@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from sqlalchemy import event
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import Settings, get_settings
@@ -34,11 +34,21 @@ def create_engine(settings: Settings | None = None, url: str | None = None) -> A
         )
     engine = create_async_engine(url, **kwargs)
     if url.startswith("sqlite"):
-        _enable_sqlite_foreign_keys(engine.sync_engine)
+        _configure_sqlite(engine.sync_engine)
     return engine
 
 
-def _enable_sqlite_foreign_keys(engine: Engine) -> None:
+def _configure_sqlite(engine: Engine) -> None:
+    """Pragmas, and savepoints that always nest inside a transaction.
+
+    The sqlite3/aiosqlite driver (legacy transaction control) emits BEGIN only before INSERT/UPDATE/DELETE, never
+    before SAVEPOINT. A `begin_nested()` that was a transaction's first write therefore ran outside any transaction
+    and was committed by its RELEASE, surviving the caller's rollback (PostgreSQL rolls it back). We emit that missing
+    BEGIN ourselves. SQLAlchemy's full recipe (driver BEGIN off, BEGIN on every transaction) is deliberately not used:
+    it opens a WAL read snapshot at the first SELECT, so a transaction that reads, waits (e.g. across an external
+    call) and then writes fails with SQLITE_BUSY ("database is locked") whenever another connection committed meanwhile.
+    """
+
     @event.listens_for(engine, "connect")
     def _set_pragma(dbapi_connection: Any, _record: Any) -> None:
         cursor = dbapi_connection.cursor()
@@ -46,6 +56,11 @@ def _enable_sqlite_foreign_keys(engine: Engine) -> None:
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
+
+    @event.listens_for(engine, "savepoint")
+    def _begin_before_savepoint(connection: Connection, _name: str | None) -> None:
+        if not connection.connection.driver_connection.in_transaction:  # type: ignore[union-attr]
+            connection.exec_driver_sql("BEGIN")
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

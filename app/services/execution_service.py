@@ -7,6 +7,7 @@ it has not already been executed. Nothing passed in by the LLM or the workflow g
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from datetime import timedelta
@@ -20,7 +21,15 @@ from app.core.config import Settings
 from app.core.errors import Conflict, IntegrationError, InvalidStateTransition, StaleVersion
 from app.core.security import compute_payload_hash
 from app.core.timeutil import utcnow
-from app.db.models import ActionExecution, EmailMessage, FollowUpTask, ProposedAction, ReplyDraft, User
+from app.db.models import (
+    ActionExecution,
+    EmailMessage,
+    FollowUpTask,
+    ProposedAction,
+    ReplyDraft,
+    User,
+    WorkflowRun,
+)
 from app.domain.enums import (
     ActionStatus,
     ActionType,
@@ -28,6 +37,7 @@ from app.domain.enums import (
     EmailAnalysisStatus,
     ExecutionStatus,
     FailureCategory,
+    WorkflowStatus,
 )
 from app.domain.state_machine import EXECUTABLE_ACTION_STATUSES, ensure_action_transition
 from app.integrations.azure_devops.base import CreateOutcome, CreateOutcomeStatus
@@ -56,6 +66,28 @@ _OUTCOME_TO_STATUS = {
     CreateOutcomeStatus.UNCERTAIN: (ExecutionStatus.UNCERTAIN, ActionStatus.UNCERTAIN),
 }
 
+# A run in these states can never legitimately hold an executable action (cancel refuses while an outcome is pending,
+# reject/cancel close every open action). Refusing here is defence in depth against inconsistent state.
+_CLOSED_RUN_STATUSES = (WorkflowStatus.CANCELLED, WorkflowStatus.REJECTED)
+
+# Share of the job lease the external create may take. Liveness is judged from `started_at` + job_lease_seconds
+# (`has_live_execution`), while the Azure DevOps adapter's worst case (retries x timeouts + capped Retry-After
+# sleeps, around lookups) is far longer. Bounding the write below the lease, with room for the surrounding database
+# writes, means an execution still RUNNING after the lease belongs to a worker that died: reconciling it is safe.
+WRITE_BUDGET_SHARE = 0.8
+
+
+async def has_live_execution(session: AsyncSession, action: ProposedAction, *, lease_seconds: int) -> bool:
+    """A worker may still be performing the action's write: an execution is RUNNING and within the lease."""
+    cutoff = utcnow() - timedelta(seconds=lease_seconds)
+    stmt = select(func.count()).where(
+        ActionExecution.tenant_id == action.tenant_id,
+        ActionExecution.action_id == action.id,
+        ActionExecution.status == ExecutionStatus.RUNNING,
+        ActionExecution.started_at >= cutoff,
+    )
+    return bool((await session.execute(stmt)).scalar_one())
+
 
 class ExecutionService:
     def __init__(self, settings: Settings, ado_client_factory: AdoClientFactory) -> None:
@@ -76,9 +108,24 @@ class ExecutionService:
             raise self._deny(actor, action, "The action has not been approved.")
         if action.status not in EXECUTABLE_ACTION_STATUSES:
             raise InvalidStateTransition(f"An action in status '{action.status}' cannot be executed.")
+        await self._refuse_if_run_closed(session, actor, action)
         if await current_approval(session, action) is None:
             raise self._deny(actor, action, "The action has no valid approval for its current version.")
         return action
+
+    async def reconcile_preflight(self, session: AsyncSession, actor: Actor, action_id: uuid.UUID) -> ProposedAction:
+        """Fast checks before queuing a reconcile. `reconcile` repeats them under the row lock."""
+        action = await load_action(session, actor, action_id)
+        await self._check_actor(session, actor, action)
+        await self._ensure_reconcilable(session, action)
+        return action
+
+    async def has_live_execution(self, session: AsyncSession, action: ProposedAction) -> bool:
+        return await has_live_execution(session, action, lease_seconds=self.settings.job_lease_seconds)
+
+    @property
+    def write_budget_seconds(self) -> float:
+        return self.settings.job_lease_seconds * WRITE_BUDGET_SHARE
 
     # ------------------------------------------------------------------ execution
 
@@ -99,27 +146,16 @@ class ExecutionService:
             if existing is not None:
                 return existing
         if action.status is ActionStatus.EXECUTING:
-            if await self._has_live_execution(session, action):
+            if await self.has_live_execution(session, action):
                 raise Conflict("The action is already executing.")
             # A worker died mid-write: the outcome is unknown, never re-send blindly.
             return await self._reconcile_locked(session, actor, action, reason="stale execution lease")
         if action.status is ActionStatus.PENDING_APPROVAL:
             raise self._deny(actor, action, "The action has not been approved.")
         if action.status not in EXECUTABLE_ACTION_STATUSES:
-            record_audit(
-                session,
-                tenant_id=action.tenant_id,
-                actor=actor,
-                event_type="execution_blocked",
-                resource_type="action",
-                resource_id=action.id,
-                action_id=action.id,
-                workflow_run_id=action.workflow_run_id,
-                outcome=AuditOutcome.DENIED,
-                details={"status": action.status.value},
-            )
-            await session.commit()
+            await self._record_blocked(session, actor, action, status=action.status.value)
             raise InvalidStateTransition(f"An action in status '{action.status}' cannot be executed.")
+        await self._refuse_if_run_closed(session, actor, action)
         if expected_version is not None and expected_version != action.version:
             raise StaleVersion()
         if expected_payload_hash is not None and expected_payload_hash != action.payload_hash:
@@ -145,10 +181,8 @@ class ExecutionService:
             raise self._deny(actor, action, "The action has no valid approval for its current version.")
 
         previous = await self._succeeded_execution(session, action)
-        if previous is not None:  # repair a status that lagged behind a successful write
-            action.status = ActionStatus.COMPLETED
-            await session.commit()
-            return previous
+        if previous is not None:  # the write already succeeded; only the action's status lagged behind
+            return await self._repair_completed(session, actor, action, previous)
 
         email = await session.get(EmailMessage, action.email_message_id)
         policy = ActionPolicy(await get_tenant_settings(session, action.tenant_id, self.settings), self.settings)
@@ -220,10 +254,7 @@ class ExecutionService:
     async def reconcile(self, session: AsyncSession, actor: Actor, action_id: uuid.UUID) -> ActionExecution:
         action = await load_action(session, actor, action_id, for_update=True)
         await self._check_actor(session, actor, action)
-        if action.status is ActionStatus.EXECUTING and await self._has_live_execution(session, action):
-            raise Conflict("The action is still executing.")
-        if action.status not in (ActionStatus.UNCERTAIN, ActionStatus.EXECUTING):
-            raise InvalidStateTransition("Only uncertain actions can be reconciled.")
+        await self._ensure_reconcilable(session, action)
         return await self._reconcile_locked(session, actor, action, reason="manual reconcile")
 
     # ------------------------------------------------------------------ internals
@@ -252,14 +283,74 @@ class ExecutionService:
         )
         return (await session.execute(stmt)).scalar_one_or_none()
 
-    async def _has_live_execution(self, session: AsyncSession, action: ProposedAction) -> bool:
-        cutoff = utcnow() - timedelta(seconds=self.settings.job_lease_seconds)
-        stmt = select(func.count()).where(
-            ActionExecution.action_id == action.id,
-            ActionExecution.status == ExecutionStatus.RUNNING,
-            ActionExecution.started_at >= cutoff,
+    async def _ensure_reconcilable(self, session: AsyncSession, action: ProposedAction) -> None:
+        """Uncertain actions, and executing ones whose worker is gone (stale lease), may be reconciled."""
+        if action.status is ActionStatus.EXECUTING and await self.has_live_execution(session, action):
+            raise Conflict("The action is still executing.")
+        if action.status not in (ActionStatus.UNCERTAIN, ActionStatus.EXECUTING):
+            raise InvalidStateTransition("Only uncertain actions can be reconciled.")
+
+    async def _record_blocked(
+        self, session: AsyncSession, actor: Actor, action: ProposedAction, **details: str
+    ) -> None:
+        record_audit(
+            session,
+            tenant_id=action.tenant_id,
+            actor=actor,
+            event_type="execution_blocked",
+            resource_type="action",
+            resource_id=action.id,
+            action_id=action.id,
+            workflow_run_id=action.workflow_run_id,
+            outcome=AuditOutcome.DENIED,
+            details=details,
         )
-        return bool((await session.execute(stmt)).scalar_one())
+        await session.commit()
+
+    async def _refuse_if_run_closed(self, session: AsyncSession, actor: Actor, action: ProposedAction) -> None:
+        run_status = (
+            await session.execute(
+                select(WorkflowRun.status).where(
+                    WorkflowRun.tenant_id == action.tenant_id, WorkflowRun.id == action.workflow_run_id
+                )
+            )
+        ).scalar_one_or_none()
+        if run_status is None or run_status not in _CLOSED_RUN_STATUSES:
+            return
+        await self._record_blocked(session, actor, action, status=action.status.value, workflow_status=run_status.value)
+        raise InvalidStateTransition(f"The workflow is {run_status}; its actions can no longer be executed.")
+
+    async def _repair_completed(
+        self, session: AsyncSession, actor: Actor, action: ProposedAction, previous: ActionExecution
+    ) -> ActionExecution:
+        """Record the outcome of a write that already succeeded; never send it again."""
+        lagged = action.status
+        # approved|failed → executing → completed is the path the successful execution took.
+        ensure_action_transition(lagged, ActionStatus.EXECUTING)
+        ensure_action_transition(ActionStatus.EXECUTING, ActionStatus.COMPLETED)
+        action.status = ActionStatus.COMPLETED
+        action.external_id = action.external_id or previous.external_id
+        action.external_url = action.external_url or previous.external_url
+        action.executed_at = action.executed_at or previous.finished_at or utcnow()
+        action.last_error = None
+        record_audit(
+            session,
+            tenant_id=action.tenant_id,
+            actor=actor,
+            event_type="execution_status_repaired",
+            resource_type="action",
+            resource_id=action.id,
+            action_id=action.id,
+            workflow_run_id=action.workflow_run_id,
+            outcome=AuditOutcome.SUCCESS,
+            details={
+                "from_status": lagged.value,
+                "execution_id": str(previous.id),
+                "external_id": previous.external_id,
+            },
+        )
+        await session.commit()
+        return previous
 
     @staticmethod
     async def _next_attempt(session: AsyncSession, action: ProposedAction) -> int:
@@ -328,7 +419,24 @@ class ExecutionService:
                     client = await self.ado_client_factory(session, actor)
                     try:
                         request = build_create_request(payload, idempotency_key=action.idempotency_key)
-                        return await client.create_work_item_idempotent(request)
+                        async with asyncio.timeout(self.write_budget_seconds):
+                            return await client.create_work_item_idempotent(request)
+                    except TimeoutError:
+                        # The create may have been sent: the outcome is unknown until a reconcile looks it up.
+                        log.warning(
+                            "execution_write_budget_exceeded",
+                            action_id=str(action.id),
+                            budget_s=self.write_budget_seconds,
+                        )
+                        return CreateOutcome(
+                            status=CreateOutcomeStatus.UNCERTAIN,
+                            error_category=FailureCategory.AMBIGUOUS,
+                            error_message=(
+                                "The Azure DevOps create did not finish in time; its outcome is unknown. "
+                                "Reconcile before retrying."
+                            ),
+                            latency_ms=int((time.perf_counter() - started) * 1000),
+                        )
                     finally:
                         await client.aclose()
                 case EmailReplyDraftPayload():

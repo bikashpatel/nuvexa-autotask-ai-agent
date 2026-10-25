@@ -799,7 +799,7 @@ async def _expire_execution_lease(h: Harness, action_id: str) -> None:
         await queue.recover_expired_leases(s, h.settings.job_lease_seconds)
 
 
-# DEFECT: an unrecorded write stays "executing" forever: the job retry is swallowed, /reconcile needs "uncertain".
+# Regression (Prompt 5): /reconcile accepts an executing action whose execution is stale (its worker is gone).
 async def test_a_write_whose_outcome_could_not_be_recorded_still_converges_through_the_tag_lookup(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -837,6 +837,58 @@ async def test_a_write_whose_outcome_could_not_be_recorded_still_converges_throu
     assert done["external_id"] == str(_items()[0].id)
     assert len(_items()) == 1
     assert _attempts(harness.ado.clients) == 1  # converged through the tag lookup, never re-sent
+
+
+async def _executing_since(h: Harness, action: dict[str, Any], user_id: uuid.UUID, seconds_ago: int) -> None:
+    """A worker claimed the action `seconds_ago` and is (or was) performing its write."""
+    [approval] = await _live_approvals(h, action["id"])
+    async with h.db.session() as s:
+        await s.execute(
+            update(ProposedAction).where(ProposedAction.id == uuid.UUID(action["id"])).values(status="executing")
+        )
+        s.add(
+            ActionExecution(
+                tenant_id=approval.tenant_id,
+                action_id=approval.action_id,
+                approval_id=approval.id,
+                requested_by_user_id=user_id,
+                attempt_number=1,
+                status=ExecutionStatus.RUNNING,
+                action_version=action["version"],
+                payload_hash=action["payload_hash"],
+                started_at=utcnow() - timedelta(seconds=seconds_ago),
+            )
+        )
+        await s.commit()
+
+
+# Regression (Prompt 5): the API, the UI flag and the service agree: a live execution is never reconciled.
+async def test_reconcile_is_refused_while_the_execution_is_live_and_offered_once_it_is_stale(harness: Harness) -> None:
+    member, wi, _ = await _work_item(harness)
+    await _approve(member, wi)
+    await harness.drain()
+    viewer = await harness.persona("viewer")
+    await _executing_since(harness, wi, member.user_id, seconds_ago=10)  # well inside the lease
+
+    assert (await _get(member, wi))["permissions"]["can_reconcile"] is False
+    assert_error(await member.post(f"/actions/{wi['id']}/reconcile"), 409, "conflict")
+    assert await harness.audit_events(event_type="reconcile_requested") == []
+
+    async with harness.db.session() as s:  # the worker is gone: its lease passed without an outcome
+        await s.execute(
+            update(ActionExecution)
+            .where(ActionExecution.action_id == uuid.UUID(wi["id"]))
+            .values(started_at=utcnow() - timedelta(seconds=harness.settings.job_lease_seconds + 5))
+        )
+        await s.commit()
+    assert_error(await viewer.post(f"/actions/{wi['id']}/reconcile"), 404)  # still owner-scoped
+    assert (await _get(member, wi))["permissions"]["can_reconcile"] is True
+    assert (await member.post(f"/actions/{wi['id']}/reconcile")).status_code == 202
+    await harness.drain()
+    done = await _get(member, wi)
+    assert done["status"] == "failed"  # the tag lookup found nothing: safe to retry under the approval
+    assert _items() == []
+    assert _attempts(harness.ado.clients) == 0
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -901,7 +953,7 @@ async def test_closed_actions_never_reach_the_external_write(harness: Harness, s
     assert (await _get(member, wi))["status"] == current["status"]
 
 
-# DEFECT: cancelling a workflow skips its uncertain action (approval stays live); reconcile→failed then lets it execute.
+# Regression (Prompt 5): cancelling a workflow is refused (409) while any action is executing or uncertain.
 async def test_cancelled_workflow_never_executes_an_action_that_was_uncertain_when_it_was_cancelled(
     harness: Harness,
 ) -> None:

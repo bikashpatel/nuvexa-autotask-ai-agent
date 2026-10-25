@@ -157,5 +157,11 @@ async def test_job_queue_dedupe_concurrency_and_lease_recovery(harness: Harness)
         assert claimed is not None
         status = await queue.fail(s, claimed, "boom", retryable=True)
         assert status in (JobStatus.QUEUED, JobStatus.DEAD)
-        status = await queue.fail(s, claimed, "boom", retryable=False)
+        # The released claim is gone: releasing it again is a fenced no-op (Prompt 5), not a second outcome.
+        assert await queue.fail(s, claimed, "boom", retryable=False) is None
+        await s.execute(update(Job).where(Job.id == claimed.id).values(run_after=utcnow()))  # backoff elapses
+        await s.commit()
+        reclaimed = await queue.claim_next(s, "w4")
+        assert reclaimed is not None
+        status = await queue.fail(s, reclaimed, "boom", retryable=False)
         assert status is JobStatus.FAILED
