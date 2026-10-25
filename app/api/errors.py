@@ -30,7 +30,8 @@ def register_error_handlers(app: FastAPI) -> None:
         if isinstance(exc, AuditedPermissionDenied):
             await record_permission_denied(request.app.state.db.session_factory, exc)
         if exc.status_code >= 500:
-            log.error("app_error", code=exc.code, error=exc.message)
+            # Not `code=`: the log redaction masks every key named `code` (OAuth authorization codes).
+            log.error("app_error", error_code=exc.code, error=exc.message)
         message = exc.message if exc.status_code < 500 or exc.code != "internal_error" else exc.public_message
         return JSONResponse(status_code=exc.status_code, content=_body(exc.code, message, exc.details))
 

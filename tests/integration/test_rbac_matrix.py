@@ -365,7 +365,8 @@ async def test_sync_requires_permission_and_an_own_mailbox(harness: Harness, per
         assert resp.status_code == 202  # their own (empty) demo mailbox
     member_account = (await world["member"].get("/integrations")).json()["microsoft"]["connections"][0]["id"]
     resp = await p.post("/emails/sync", json={"connected_account_id": member_account})
-    assert_error(resp, 403 if persona == "viewer" else 409)
+    # Regression (Prompt 5): another user's connection is invisible (404, invariant 5), not a 409 conflict.
+    assert_error(resp, *((403, "permission_denied") if persona == "viewer" else (404, "not_found")))
 
 
 # ---------------------------------------------------------------------------------------------------

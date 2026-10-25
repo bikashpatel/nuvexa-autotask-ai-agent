@@ -61,6 +61,12 @@ _MAX_NAME = 256
 _MAX_LOOKUP_IDS = 20
 _MAX_PROJECT_PAGES = 100
 _MAX_MESSAGE = 500
+# Error bodies are untrusted and may echo request data, the Authorization header (PAT / bearer token) included.
+# Only stable identifiers are propagated: the TFnnnnnn / VSnnnnnn code that prefixes `message`, the exception
+# `typeKey` and a field reference name. The free-form text is never stored, returned or logged.
+_ERROR_CODE_RE = re.compile(r"(?:TF|VS)\d{3,6}(?![0-9A-Za-z])")
+_TYPE_KEY_RE = re.compile(r"[A-Z][A-Za-z0-9]{0,80}Exception")
+_MAX_FIELD_REF = 128
 _LOOKUP_FIELDS = (
     "System.Id",
     "System.Title",
@@ -118,6 +124,24 @@ def _clean_message(value: Any) -> str | None:
         return None
     text = " ".join(_CONTROL_RE.sub(" ", value).split())
     return text[:_MAX_MESSAGE] or None
+
+
+def _error_codes(body: dict[str, Any] | None) -> list[str]:
+    """The error code and exception type of an Azure DevOps error body (allow-listed shapes only)."""
+    codes: list[str] = []
+    message = (body or {}).get("message")
+    if isinstance(message, str) and (code := _ERROR_CODE_RE.match(message.lstrip())):
+        codes.append(code.group())
+    type_key = (body or {}).get("typeKey")
+    if isinstance(type_key, str) and _TYPE_KEY_RE.fullmatch(type_key):
+        codes.append(type_key)
+    return codes
+
+
+def _error_field(body: dict[str, Any] | None) -> str | None:
+    """The field reference name an Azure DevOps error body points at, when it is a well-formed one."""
+    ref = _as_str(_as_dict(_as_dict(body).get("customProperties")).get("FieldReferenceName"))
+    return ref if ref is not None and len(ref) <= _MAX_FIELD_REF and _FIELD_REF_RE.match(ref) else None
 
 
 # ---------------------------------------------------------------------------------------------
@@ -285,8 +309,9 @@ class AzureDevOpsRestClient:
                 status=status,
             )
         body = self._body(response)
-        message = _clean_message(body.get("message")) if body else None
-        detail = f": {message}" if message else ""
+        field = _error_field(body)
+        identifiers = [*_error_codes(body), *([f"field {field}"] if field else [])]
+        detail = f": {', '.join(identifiers)}" if identifiers else ""
         if status == 401:
             return IntegrationError(
                 "Azure DevOps authentication failed: the PAT or access token is invalid or expired",
@@ -497,14 +522,14 @@ class AzureDevOpsRestClient:
         if 200 <= response.status_code < 300 and not self._is_sign_in_response(response):
             return WorkItemValidationResult(valid=True)
         if response.status_code == 400:
-            body = self._body(response) or {}
-            field_ref = _as_str(_as_dict(body.get("customProperties")).get("FieldReferenceName"))
+            body = self._body(response)
+            codes = _error_codes(body)
             return WorkItemValidationResult(
                 valid=False,
                 issues=[
                     FieldIssue(
-                        field=field_ref,
-                        message=_clean_message(body.get("message")) or "Azure DevOps rejected the work item",
+                        field=_error_field(body),
+                        message="Azure DevOps rejected the work item" + (f" ({', '.join(codes)})" if codes else ""),
                     )
                 ],
             )

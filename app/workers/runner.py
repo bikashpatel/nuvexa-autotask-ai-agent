@@ -20,7 +20,7 @@ from app.core.config import Settings
 from app.core.context import new_correlation_id, set_correlation_id
 from app.core.errors import AppError, IntegrationError
 from app.core.timeutil import utcnow
-from app.db.models import ConnectedAccount, Job, WorkflowRun
+from app.db.models import ConnectedAccount, Job, User, WorkflowRun
 from app.db.session import Database
 from app.domain.enums import ConnectionProvider, ConnectionStatus, JobType
 from app.observability.logging import get_logger
@@ -229,9 +229,14 @@ class Worker:
             accounts = (
                 (
                     await s.execute(
-                        select(ConnectedAccount).where(
+                        select(ConnectedAccount)
+                        # A deactivated user's mailbox is not polled: their stored tokens must stay unused.
+                        .join(User, User.id == ConnectedAccount.user_id)
+                        .where(
                             ConnectedAccount.status == ConnectionStatus.ACTIVE,
                             ConnectedAccount.provider == ConnectionProvider.MICROSOFT_GRAPH,
+                            User.is_active.is_(True),
+                            User.tenant_id == ConnectedAccount.tenant_id,
                         )
                     )
                 )

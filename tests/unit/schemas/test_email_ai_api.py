@@ -188,6 +188,30 @@ def test_api_request_models() -> None:
         ActionUpdateRequest.model_validate({"expected_version": 1, "payload": {}, "approve": True})
 
 
+@pytest.mark.parametrize(
+    ("model", "data", "loc"),
+    [
+        (RejectRequest, {"reason": "duplicate\x00 of #12"}, ("reason",)),
+        (ApproveRequest, {"version": 1, "payload_hash": "a" * 64, "comment": "ok\x00"}, ("comment",)),
+        (ActionUpdateRequest, {"expected_version": 1, "payload": {"title": ["x", {"y": "z\x00"}]}}, ("payload",)),
+        (ActionUpdateRequest, {"expected_version": 1, "payload": {"ti\x00tle": "x"}}, ("payload",)),
+    ],
+)
+def test_nul_characters_in_request_text_are_rejected(model: type[Any], data: dict[str, Any], loc: tuple[str]) -> None:
+    # Regression (Prompt 5): PostgreSQL text/jsonb cannot store NUL; requests carrying it fail validation (422).
+    with pytest.raises(ValidationError) as caught:
+        model.model_validate(data)
+    [error] = caught.value.errors(include_input=False)
+    assert (error["type"], error["loc"]) == ("nul_character", loc)
+    assert "\x00" not in error["msg"]
+
+
+def test_request_text_without_nul_is_accepted_including_nested_payloads() -> None:
+    payload = {"title": "Login fails", "tags": ["a", "b"], "nested": {"k": ("v", 1, None, True)}, "n": 2}
+    assert ActionUpdateRequest.model_validate({"expected_version": 1, "payload": payload}).payload == payload
+    assert RejectRequest(reason="tab\tand newline\nare fine").reason == "tab\tand newline\nare fine"
+
+
 def test_page_and_error_response() -> None:
     page = Page[int](items=[1, 2], total=10, limit=2, offset=0)
     assert page.model_dump() == {"items": [1, 2], "total": 10, "limit": 2, "offset": 0}

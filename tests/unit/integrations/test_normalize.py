@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.integrations.microsoft_graph.normalize import normalize_graph_message, parse_graph_datetime
+from app.integrations.microsoft_graph.normalize import normalize_graph_message, parse_graph_datetime, usable_message_id
 
 FULL = {
     "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0Ac=",
@@ -138,3 +138,50 @@ def test_parse_graph_datetime_handles_invalid_values():
     assert parse_graph_datetime(None) is None
     parsed = parse_graph_datetime("2026-10-20T08:30:00")  # naive → assumed UTC
     assert parsed == datetime(2026, 10, 20, 8, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("bad_id", ["m\x00", "m\u202e1", "m-\ud800", "line\nbreak"])
+def test_message_ids_with_control_characters_are_rejected(bad_id):
+    # Regression (Prompt 5): the provider id is stored verbatim, so one PostgreSQL cannot store is unusable.
+    assert usable_message_id(bad_id) is False
+    with pytest.raises(ValueError, match="id"):
+        normalize_graph_message({"id": bad_id})
+    assert usable_message_id("AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0Ac=") is True
+
+
+def test_identifier_fields_are_cleaned_and_bounded():
+    # Regression (Prompt 5): NUL (rejected by PostgreSQL) and other control characters never reach the database.
+    email = normalize_graph_message(
+        {
+            "id": "m4",
+            "internetMessageId": "<abc\x00@example.com>" + "i" * 2_000,
+            "conversationId": "\x00\x07  conv\r\n id\u200b ",
+            "changeKey": "\x00\x00",
+            "from": {"emailAddress": {"address": " ada\x00@exa\tmple.com "}},
+            "toRecipients": [{"emailAddress": {"address": "to\x00@example.com"}}, {"emailAddress": {"address": 7}}],
+            "attachments": [{"name": "a.txt", "contentType": 'text/plain\x00; name="x"\r\nX-Injected: 1'}],
+        }
+    )
+    assert email.internet_message_id == ("<abc @example.com>" + "i" * 2_000)[:998]
+    assert email.conversation_id == "conv id"
+    assert email.change_key is None  # nothing usable left
+    assert email.sender is not None
+    assert email.sender.address == "ada @exa mple.com"
+    assert [r.address for r in email.to_recipients] == ["to @example.com"]
+    assert email.attachments[0].content_type == 'text/plain ; name="x" X-Injected: 1'
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://outlook.office.com/mail/\x00id",
+        "https://outlook.office.com/mail/\r\nSet-Cookie: x",
+        "https://outlook.office.com/mail/a b",
+        "https://outlook.office.com/mail/" + "a" * 5_000,
+    ],
+    ids=["nul", "crlf", "space", "too-long"],
+)
+def test_web_links_with_control_characters_whitespace_or_absurd_length_are_dropped(link):
+    assert normalize_graph_message({"id": "m5", "webLink": link}).web_link is None
+    kept = normalize_graph_message({"id": "m5", "webLink": "https://outlook.office.com/mail/id"}).web_link
+    assert kept == "https://outlook.office.com/mail/id"

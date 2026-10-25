@@ -23,6 +23,7 @@ from app.core.errors import (
 from app.db.models import AuditEvent, Tenant
 from app.db.session import Database
 from app.domain.enums import AuditOutcome, UserRole
+from app.observability.logging import _redact_processor
 from app.services.authz import AuditedPermissionDenied
 from app.services.identity import actor_from_user
 from tests.conftest import UserFactory
@@ -106,7 +107,9 @@ async def test_5xx_app_errors_are_logged(
     assert logged == []
     set_exc(raising_app, IntegrationError("down"))
     await _get(make_client, raising_app)
-    assert logged == [{"event": "app_error", "code": "integration_error", "error": "down"}]
+    assert logged == [{"event": "app_error", "error_code": "integration_error", "error": "down"}]
+    # Regression (Prompt 5): the error code is logged under a key the redaction processor leaves readable.
+    assert _redact_processor(None, "error", dict(logged[0])) == logged[0]
 
 
 async def test_permission_denied_is_audited(
