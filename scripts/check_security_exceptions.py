@@ -12,7 +12,8 @@ a ruff flake8-bandit (`S…`) noqa, a scanner flag such as `--ignore-unfixed` or
 (`SEC-EX-NNN`) on the same line or on the comment line directly above it.
 
 Exit 1 when a marker cites nothing or an unknown id, an entry is incomplete, expired or cited nowhere.
-Exceptions expiring within 14 days are printed as warnings. Standard library only.
+Exceptions expiring within 14 days are printed as warnings. Standard library only; runs on Python 3.12+
+(the CI runner's python3), so avoid syntax newer than 3.12.
 """
 
 from __future__ import annotations
@@ -206,8 +207,11 @@ def _read_files(listing: bytes) -> dict[str, str]:
         try:
             with open(path, "rb") as handle:
                 data = handle.read()
-        except FileNotFoundError, IsADirectoryError:
-            continue  # deleted in the working tree / submodule
+        # Two clauses, not `except A, B:` — CI runs this with the runner's python3 (3.12).
+        except FileNotFoundError:
+            continue  # deleted in the working tree
+        except IsADirectoryError:
+            continue  # submodule
         if b"\0" in data[:8192]:
             continue  # binary
         files[path] = data.decode("utf-8", "replace")
