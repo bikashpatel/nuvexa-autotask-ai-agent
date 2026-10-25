@@ -138,7 +138,9 @@ export function ActionControls({
   const showCancel = permissions.can_cancel && (isOpen || status === 'failed');
   const showExecute =
     permissions.can_execute && (status === 'approved' || (status === 'failed' && approvalValid));
-  const showReconcile = permissions.can_reconcile && status === 'uncertain';
+  // `can_reconcile` on an executing action means its execution lease expired without a recorded outcome.
+  const showReconcile = permissions.can_reconcile && (status === 'uncertain' || status === 'executing');
+  const staleExecution = showReconcile && status === 'executing';
 
   const blockedReason = dirty
     ? 'Save or discard your edits first — approvals bind to the saved payload.'
@@ -365,6 +367,12 @@ export function ActionControls({
             check the latest status.
           </Text>
         </Group>
+      ) : null}
+      {staleExecution ? (
+        <Text size="xs" c="dimmed" mt={6}>
+          This execution stopped without recording its outcome. Reconcile looks the work item up in Azure
+          DevOps by its idempotency tag; it never creates a second one.
+        </Text>
       ) : null}
       {showApprove && blockedReason ? (
         <Text size="xs" c="dimmed" mt={6}>

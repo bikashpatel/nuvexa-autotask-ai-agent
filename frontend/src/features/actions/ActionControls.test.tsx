@@ -120,7 +120,7 @@ describe('<ActionControls> visibility follows status and API permission flags', 
     expect(visibleControls()).toEqual(expected);
   });
 
-  it.each<ActionStatus>(['executing', 'completed', 'rejected', 'cancelled', 'superseded'])(
+  it.each<ActionStatus>(['completed', 'rejected', 'cancelled', 'superseded'])(
     '%s offers no controls',
     (status) => {
       renderControls(
@@ -130,6 +130,31 @@ describe('<ActionControls> visibility follows status and API permission flags', 
       expect(screen.getByText('No actions available for you in this state.')).toBeInTheDocument();
     },
   );
+
+  it('a live execution offers no controls (the server withholds can_reconcile)', () => {
+    renderControls(
+      adoAction({
+        status: 'executing',
+        permissions: { ...ALL_ACTION_PERMISSIONS, can_reconcile: false },
+        current_approval: validApproval,
+      }),
+    );
+    expect(visibleControls()).toEqual([]);
+    expect(screen.getByText('No actions available for you in this state.')).toBeInTheDocument();
+  });
+
+  it('an execution whose outcome was never recorded offers Reconcile and explains it', () => {
+    // The server sets can_reconcile on an executing action only once its execution lease has expired.
+    renderControls(
+      adoAction({
+        status: 'executing',
+        permissions: ALL_ACTION_PERMISSIONS,
+        current_approval: validApproval,
+      }),
+    );
+    expect(visibleControls()).toEqual(['Reconcile']);
+    expect(screen.getByText(/stopped without recording its outcome/i, { exact: false })).toBeInTheDocument();
+  });
 
   it.each<[keyof ActionPermissions, ActionStatus, ApprovalOut | null, string[]]>([
     ['can_approve', 'pending_approval', null, ['Approve']],
@@ -144,6 +169,7 @@ describe('<ActionControls> visibility follows status and API permission flags', 
     ['can_execute', 'pending_approval', null, []],
     ['can_execute', 'failed', validApproval, ['Retry execution']],
     ['can_reconcile', 'uncertain', null, ['Reconcile']],
+    ['can_reconcile', 'executing', null, ['Reconcile']],
     ['can_reconcile', 'failed', null, []],
   ])('only %s on %s → %j', (flag, status, approval, expected) => {
     renderControls(
