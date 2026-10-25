@@ -135,6 +135,17 @@ on the tag; if a user deletes the tag or the work item between a timeout and the
 or WIQL indexing lags, a duplicate is theoretically possible. Such cases surface as `uncertain` and
 require a human to reconcile; the system never blindly retries an ambiguous write.
 
+Interrupted or unrecorded writes converge instead of sticking:
+
+* An Azure DevOps create is bounded to 80 % of `JOB_LEASE_SECONDS` (default 240 s of 300 s); a create
+  that runs out of time is recorded `uncertain`, so an execution older than its lease always belongs to a
+  dead worker. Such an `executing` action can be reconciled (tag lookup, never a second create).
+* Job-queue `complete`/`fail`/`heartbeat` are fenced on the lease holder and attempt, so a stalled worker
+  whose lease was taken over cannot release or re-queue another worker's job. Job rows with a type this
+  version does not know stay queued for a newer worker instead of blocking the queue.
+* A workflow cannot be cancelled while a write is in flight or uncertain, and execution re-checks that the
+  parent run is not cancelled or rejected.
+
 ## Least-privilege permissions
 
 | Integration | Permission | Why |

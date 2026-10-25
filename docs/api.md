@@ -86,7 +86,7 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
 | GET | `/workflows/{id}/actions` | `ActionOut[]` |
 | GET | `/workflows/{id}/events` | `WorkflowEventOut[]` (timeline, tool calls, sanitized) |
 | POST | `/workflows/{id}/reanalyze` | 202 `JobAccepted` — supersedes open proposals |
-| POST | `/workflows/{id}/cancel` | `WorkflowRunOut` — cancels open proposals |
+| POST | `/workflows/{id}/cancel` | `WorkflowRunOut` — cancels open proposals; `409 conflict` while any action is `executing` or `uncertain` (resolve it first) |
 
 ### Actions (approvals and execution)
 | Method | Path | Notes |
@@ -97,8 +97,8 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
 | POST | `/actions/{id}/approve` | Body `ApproveRequest {version, payload_hash, comment?}` — must match the current action → `ActionDetail` |
 | POST | `/actions/{id}/reject` | Body `RejectRequest {reason}` → `ActionDetail` |
 | POST | `/actions/{id}/cancel` | Body `CancelRequest {reason?}` → `ActionDetail` |
-| POST | `/actions/{id}/execute` | Body `ExecuteRequest {version, payload_hash}` → 202 `ExecuteAccepted {action, job_id}` |
-| POST | `/actions/{id}/reconcile` | For `uncertain` actions: queues an idempotency-tag lookup → 202 `ExecuteAccepted {action, job_id}`; found → `completed`, confirmed absent → `failed` (safe to retry) |
+| POST | `/actions/{id}/execute` | Body `ExecuteRequest {version, payload_hash}` → 202 `ExecuteAccepted {action, job_id}`. Actions of a cancelled or rejected workflow → `409 invalid_state_transition` (audited `execution_blocked`) |
+| POST | `/actions/{id}/reconcile` | For `uncertain` actions, and `executing` actions whose execution lease expired without a recorded outcome: queues an idempotency-tag lookup → 202 `ExecuteAccepted {action, job_id}`; found → `completed`, confirmed absent → `failed` (safe to retry). A live execution → `409 conflict`. `permissions.can_reconcile` follows the same rule |
 | GET | `/actions/{id}/executions` | `ExecutionOut[]` |
 | GET | `/actions/{id}/history` | `AuditEventOut[]` |
 
