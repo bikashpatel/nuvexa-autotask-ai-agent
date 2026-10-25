@@ -26,7 +26,7 @@ exactly one layer and layers can be run independently.
 
 | Layer | Location | Select with | Tests (2026-10-25) | Runtime | What it proves |
 |---|---|---|---|---|---|
-| Unit | `tests/unit/` | `uv run pytest -m unit` | 2,665 | ~60 s | Each module in isolation (services, workflow nodes, adapters with respx, agents, schemas, state machine) |
+| Unit | `tests/unit/` | `uv run pytest -m unit` | 2,674 | ~60 s | Each module in isolation (services, workflow nodes, adapters with respx, agents, schemas, state machine) |
 | Integration | `tests/integration/` | `uv run pytest -m integration` | 308 | ~60 s | Real API → services → LangGraph → worker → DB in-process; every endpoint, RBAC matrix, OAuth flows, REST adapters against mocked HTTP |
 | Security | `tests/security/` | `uv run pytest -m security` | 139 | ~5 s | Security invariants, regression tests for every audit finding, and release gates: egress inventory / single write path, supply-chain configuration, CI pipeline contract |
 | Evaluation | `tests/evaluation/` | `uv run pytest -m evaluation` | 44 | ~5 s | Offline AI baseline on the labelled synthetic dataset |
@@ -134,6 +134,7 @@ Scanner and CI-gate results: docs/CI_SECURITY_GATES.md §8.
 | Backend tests, PostgreSQL 18, layered as in CI | unit 2,659 + integration 308 + security 138 + evaluation 44 = 3,149 passed, 2 skipped, 5 xfail |
 | Backend coverage (line + branch) | 99.57 % (SQLite), 99.61 % (PostgreSQL, combined layers); gate 99 % |
 | CI, Prompt 2 commit `dad3218` (run 40144764111) | PostgreSQL job: 3,038 passed, 2 skipped, 5 xfailed; coverage 99.61 %; all jobs green |
+| CI with the release gates, `aaef287` (runs 40148542307 and 40149198842) | every gate green; PostgreSQL layers 2,663 / 308 / 138 / 44 passed; SQLite 3,143 passed (99.57 %); frontend 1,167; system E2E on the runner 37 passed |
 | Frontend | 1,167 tests; 99.93 % statements, 98.55 % branches, 100 % functions and lines |
 | System E2E | 37 passed |
 | Mutation testing, first run | 2,492 mutants: 2,077 killed, 414 survived, 1 untested — 83.4 %; `state_machine` and `authz` 100 % |

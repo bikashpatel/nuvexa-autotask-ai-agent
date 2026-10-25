@@ -158,7 +158,9 @@ Also recommended:
 
 ## 7. Reproducing the jobs locally
 
-Requirements: Docker, uv 0.12.1, Node 24 / npm ≥ 11.10, git.
+Requirements: Docker, uv 0.12.1, Node 24 / npm ≥ 11.10, git, and `python3` ≥ 3.12 for the standard-library
+helper scripts (CI uses the runner's system Python; `tests/unit/tooling/test_runner_python_compat.py` keeps
+them 3.12-compatible).
 
 | Job | Command (repository root) |
 |---|---|
@@ -183,10 +185,27 @@ not.
 
 | Date | Where | Commit | Result |
 |---|---|---|---|
-| 2026-10-25 | local (macOS arm64) | working tree before the Prompt 4 commit | see the table below |
-| 2026-10-25 | GitHub Actions | Prompt 4 commit | recorded in docs/TESTING_STRATEGY.md §8 after the run |
+| 2026-10-25 | GitHub Actions [run 40147767430](https://github.com/bikashpatel/nuvexa-autotask-ai-agent/actions/runs/40147767430) (push) | `7699aee` | **Failed, correctly blocked.** Every gate job passed except `pipeline-config`: the exception checker used Python 3.14 syntax while the runner's `python3` is 3.12. `CI gate` failed on that single job. Fixed test-first in `aaef287` (`test_runner_python_compat.py`) |
+| 2026-10-25 | GitHub Actions [run 40148542307](https://github.com/bikashpatel/nuvexa-autotask-ai-agent/actions/runs/40148542307) (push) | `aaef287` | **All gates green**, `CI gate` passed (E2E skipped, as on every push) |
+| 2026-10-25 | GitHub Actions [run 40149198842](https://github.com/bikashpatel/nuvexa-autotask-ai-agent/actions/runs/40149198842) (workflow_dispatch, `e2e=true`) | `aaef287` | **All gates green including the opt-in E2E job** (37 passed against the Compose stack on the runner), `CI gate` passed |
+| 2026-10-25 | local (macOS arm64) | working tree before `7699aee` | table below |
 
-| Gate | Local result (2026-10-25) |
+GitHub Actions results (run 40148542307; run 40149198842 matched):
+
+| Gate | Result |
+|---|---|
+| Backend on PostgreSQL 18 (layers) | unit 2,663 · integration 308 · security 138 · evaluation 44 passed; combined line + branch coverage 99.61 % (19 missed lines, 18 partial branches of 7,772 / 1,612); about 9 min |
+| Backend on SQLite | 3,143 passed, 12 skipped, 5 strict xfail; 99.57 % |
+| Frontend | format, lint, typecheck; 1,167 tests within the thresholds; build |
+| Dependency audit | pip-audit: no known vulnerabilities; npm audit: 0; 293 packages with verified registry signatures (`fsevents` is macOS-only); SBOMs published |
+| Secret scan | gitleaks: no leaks; the checkout includes other fetched branches, so the scan covered more commits than HEAD |
+| SAST | semgrep 0 findings; bandit no issues |
+| Containers | backend 0 fixable (44 HIGH, 58 MEDIUM, 61 LOW, 1 UNKNOWN without a fix: SEC-EX-001); frontend 0; runtime users `10001:10001` and `nginx` |
+| Configuration | Trivy config clean; actionlint clean; zizmor online audits clean; exception register valid |
+
+Local results (2026-10-25, before the first push):
+
+| Gate | Local result |
 |---|---|
 | Backend, SQLite, coverage gate | 3,143 passed, 12 skipped, 5 strict xfail; 99.57 % line + branch |
 | Backend, PostgreSQL 18, layered as in CI | unit 2,659 · integration 308 · security 138 · evaluation 44 passed (2 skipped, 5 strict xfail); combined coverage 99.61 % |
