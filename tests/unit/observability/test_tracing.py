@@ -76,7 +76,8 @@ def test_configure_tracing_enabled(otel: _Recorder) -> None:
     tracing.configure_tracing(settings, "nuvexa-api")
     names = [name for name, _ in otel.calls]
     assert names == ["exporter", "batch", "provider", "httpx"]
-    assert ("batch", "FakeExporter") in otel.calls
+    # Spans are sanitized before the OTLP exporter sees them (tests/security/test_trace_export_redaction.py).
+    assert ("batch", "SanitizingSpanExporter") in otel.calls
     provider = next(value for name, value in otel.calls if name == "provider")
     assert isinstance(provider, TracerProvider)
     attrs = dict(provider.resource.attributes)

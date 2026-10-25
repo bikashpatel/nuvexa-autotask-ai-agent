@@ -128,6 +128,10 @@ LLM output crosses the boundary only after Pydantic validation **and** policy va
   failed (<Type>)…"), so its text never reaches LangGraph checkpoint writes.
 * Email bodies are not logged (`LOG_EMAIL_CONTENT=false` default). Spans carry IDs, sizes,
   categories and token counts — not content.
+* Every exported span (ours and the FastAPI/httpx/SQLAlchemy auto-instrumentations') passes through
+  `SanitizingSpanExporter`: URL attributes keep scheme, host and path only (query strings carry OAuth codes,
+  search terms and Graph delta tokens; userinfo is removed), captured headers and bodies are dropped, and
+  exception events keep the exception type only (no message, no stack trace).
 * No chain-of-thought is requested or stored. Only concise rationales and evidence references.
 
 ### Data retention

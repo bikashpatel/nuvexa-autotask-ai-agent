@@ -200,6 +200,7 @@ the fix (files under `tests/security/` unless noted).
 | P5-33 | Low | `/assets/` error responses were cached `immutable` for a year (CDN poisoning during a rolling deploy) | status-aware cache map (`no-store` for errors) | `test_adversarial_frontend_headers.py` |
 | P5-34 | Low | `normalize_text` was not idempotent (`"e\x00́"`) | NFKC after removals | `tests/unit/core/test_text.py` |
 | P5-35 | Low | Status repair bypassed the state machine and audit (invariant 9); a log field named `code` was redacted, hiding failure reasons; HTTP-client loggers logged LLM URLs; redaction missed Basic/`sk-`/PAT shapes | state-machine transitions + `execution_status_repaired` audit; renamed fields; WARNING level; extended patterns | `test_execution_service.py`, `test_dropped_execution_requests_…`, `tests/unit/observability` |
+| P5-36 | Medium | With `OTEL_ENABLED=true`, the FastAPI/httpx auto-instrumentation exported OAuth authorization codes and Graph delta tokens (query strings), exception messages (bearer tokens, e-mail addresses) and stack traces to the trace backend (found in the follow-up OpenTelemetry check) | `SanitizingSpanExporter` wraps the OTLP exporter: URLs without query/userinfo, no captured headers/bodies, exception type only | `tests/security/test_trace_export_redaction.py` (real instrumentors) |
 
 Defects found in earlier phases (Prompt 1, F-01…F-25) are in [SECURITY_AUDIT.md](SECURITY_AUDIT.md).
 
@@ -232,7 +233,6 @@ Defects found in earlier phases (Prompt 1, F-01…F-25) are in [SECURITY_AUDIT.m
 | Messages the database rejects are skipped (recorded), not retried | Such messages are not analyzed until they change in Graph | Visible as `mailbox_sync_failed` (`skipped_messages`) — monitor |
 | Re-created Entra user (same e-mail, new object id) is refused | Sign-in blocked until an admin clears the old row (no UI) | Operations runbook ([setup-microsoft-entra.md](setup-microsoft-entra.md)) |
 | Sync rounds have no overall deadline or byte cap (up to `MAIL_SYNC_MAX_MESSAGES` bodies per round) | Slow or very large mailboxes hold a worker longer | Keep defaults; monitor sync duration |
-| OpenTelemetry auto-instrumentation not tested for exception-attribute export | Exception messages could reach the trace backend when `OTEL_ENABLED=true` | Verify against a collector before enabling in production |
 | Heuristic demo agent: 47 % category accuracy on the holdout set | Demo mode only — real use needs the OpenAI/Azure OpenAI provider, whose quality on real mail was not measured | Evaluate the configured model on representative, consented mail before go-live |
 
 Not performed: dynamic application scanning (DAST), external penetration testing, load and soak testing,
@@ -249,7 +249,7 @@ TypeScript 7 — fails the gates on its own).
 | Microsoft Graph mail sync (delta query, paging, `Retry-After`, hidden-character and HTML mail, large mailboxes) | test mailbox with `Mail.Read` consent | real delta semantics and throttling |
 | Azure DevOps create, `validateOnly`, WIQL lookup and reconcile with a PAT and with delegated tokens (incl. the area-path read question above) | sandbox organization/project | real error bodies (identifier allow-list), tag lookup latency, permissions |
 | LLM providers (`@pytest.mark.live_llm`): OpenAI and Azure OpenAI (key and Entra ID), structured outputs, content filters, 401/429/5xx | test API keys / deployment | real response shapes, the new `with_raw_response` path, categories |
-| OTLP trace export | collector | no sensitive attributes exported |
+| OTLP trace export to a real collector | collector | transport/auth (span content is sanitized and tested offline with the real instrumentors) |
 | Deployment (Azure Container Apps or similar), TLS, HSTS at the ingress, managed identity | cloud subscription (not authorized) | runtime configuration |
 
 All of these are exercised offline against faithful fakes (MSAL behaviour, signed ID tokens, respx/httpx2
@@ -276,7 +276,7 @@ mock transports); fakes cannot prove provider behaviour.
 project, consenting test mailboxes, a test LLM key, synthetic or non-confidential mail, and the
 monitoring in §9.
 
-Rationale: every defect found by adversarial testing (35, three of them high severity) is fixed with a
+Rationale: every defect found by adversarial testing and the follow-up checks (36, three of them high severity) is fixed with a
 regression test that failed first; the full backend suite passes on SQLite and PostgreSQL with 99.7 %
 line + branch coverage, the frontend with its thresholds; the critical invariants (§4) are covered by
 behaviour-level and adversarial tests; the scans show no fixable vulnerability and no unregistered
