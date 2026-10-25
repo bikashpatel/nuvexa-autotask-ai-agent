@@ -1,5 +1,6 @@
 import { Alert, Badge, Blockquote, Code, Group, List, SimpleGrid, Stack, Text } from '@mantine/core';
 import { IconAlertTriangle, IconQuote, IconQuestionMark } from '@tabler/icons-react';
+import { Fragment } from 'react';
 
 import type { AnalysisOut, ExtractionData } from '../../api/types';
 import { ConfidenceIndicator } from '../../components/ConfidenceIndicator';
@@ -57,9 +58,15 @@ export function AnalysisPanel({ analysis }: { analysis: AnalysisOut }) {
   const evidence = Array.isArray(extraction.evidence)
     ? extraction.evidence.filter((e) => e && typeof e.quote === 'string')
     : [];
+  // Each part is bidi-isolated: a U+202E in the (untrusted) name must not reorder the email after it.
   const requester = [text(extraction.requester_name), text(extraction.requester_email)]
-    .filter(Boolean)
-    .join(' · ');
+    .filter((part): part is string => Boolean(part))
+    .map((part, index) => (
+      <Fragment key={part}>
+        {index > 0 ? ' · ' : null}
+        <bdi>{part}</bdi>
+      </Fragment>
+    ));
 
   return (
     <SectionCard
@@ -123,7 +130,7 @@ export function AnalysisPanel({ analysis }: { analysis: AnalysisOut }) {
           <FactList
             labelWidth={140}
             items={[
-              { label: 'Requester', value: requester || '—' },
+              { label: 'Requester', value: requester.length > 0 ? requester : '—' },
               { label: 'Organization', value: text(extraction.organization) ?? '—' },
               { label: 'Product / system', value: text(extraction.product_or_system) ?? '—' },
               { label: 'Environment', value: text(extraction.environment) ?? '—' },

@@ -318,10 +318,24 @@ export function navigationUrl(path: string, redirectTo: string): string {
   return `${API_BASE}${path}${buildQuery({ redirect_to: safeRedirectPath(redirectTo) })}`;
 }
 
+/**
+ * Characters a same-app redirect path may contain: one leading "/" not followed by another, then the
+ * backend's allow-list (`_SAFE_REDIRECT_RE` in app/services/auth_service.py) plus "#", "+" and the
+ * other RFC 3986 sub-delimiters the URL parser leaves unencoded in a path or query. An allow-list,
+ * not a deny-list: no whitespace or control characters (the URL parser strips tab/CR/LF anywhere,
+ * so "/\t/evil.example" would become the protocol-relative "//evil.example"), no backslash (parsed
+ * as "/"), no non-ASCII. Anything else falls back to the default path.
+ */
+const SAFE_REDIRECT_RE = /^\/(?!\/)[A-Za-z0-9/_\-?=&.%#+~!$'()*,;:@]*$/;
+
 /** Only relative, same-app paths are accepted as post-login redirects. */
 export function safeRedirectPath(value: string | null | undefined, fallback = '/'): string {
-  if (!value) return fallback;
-  if (!value.startsWith('/') || value.startsWith('//') || value.startsWith('/\\')) return fallback;
-  if (value.startsWith('/login') || value.startsWith('/api/')) return fallback;
-  return value;
+  const safe =
+    typeof value === 'string' &&
+    SAFE_REDIRECT_RE.test(value) &&
+    !value.startsWith('/login') &&
+    !value.startsWith('/api/') &&
+    // Defence in depth: whatever the browser resolves the value to must stay on this origin.
+    new URL(value, window.location.origin).origin === window.location.origin;
+  return safe ? value : fallback;
 }

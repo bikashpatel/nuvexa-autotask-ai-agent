@@ -12,7 +12,6 @@ import {
   Tooltip,
   VisuallyHidden,
 } from '@mantine/core';
-import { useDebouncedValue } from '@mantine/hooks';
 import {
   IconAlertTriangle,
   IconFilterOff,
@@ -24,7 +23,6 @@ import {
   IconSparkles,
 } from '@tabler/icons-react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 
 import { emailsApi } from '../../api/endpoints';
@@ -48,6 +46,7 @@ import { StatusBadge } from '../../components/StatusBadge';
 import { TablePagination } from '../../components/TablePagination';
 import { TimeText } from '../../components/TimeText';
 import { CATEGORY_LABELS, PRIORITY_LABELS } from '../../lib/format';
+import { useUrlTextFilter } from '../../lib/useUrlTextFilter';
 import { EMAIL_ANALYSIS_STATUS, POLL_INTERVAL_MS, isEmailInFlight } from '../../theme/status';
 import { useHasPermission } from '../auth/session';
 import { useAnalyzeEmail, useSyncMailbox } from './hooks';
@@ -173,8 +172,8 @@ export function InboxPage() {
   const canSync = useHasPermission('email:sync');
   const canAnalyze = useHasPermission('workflow:run');
 
-  const [search, setSearch] = useState(params.get('q') ?? '');
-  const [debouncedSearch] = useDebouncedValue(search.trim(), 350);
+  // The search box follows ?q= (Back/Forward, in-app links) and pushes its debounced value into it.
+  const [search, setSearch] = useUrlTextFilter('q');
 
   const filters: EmailListFilters = {
     q: params.get('q') ?? undefined,
@@ -200,27 +199,6 @@ export function InboxPage() {
       { replace: true },
     );
   };
-
-  // Push the debounced search box into the URL (the URL is the source of truth for filters).
-  // Only a *new* debounced value is pushed: comparing against the URL alone would re-apply the
-  // stale value whenever the URL changes first (e.g. "Clear filters" before the debounce settles).
-  const currentQ = params.get('q') ?? '';
-  const pushedSearch = useRef(debouncedSearch);
-  useEffect(() => {
-    if (debouncedSearch === pushedSearch.current) return;
-    pushedSearch.current = debouncedSearch;
-    if (debouncedSearch === currentQ) return;
-    setParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        if (debouncedSearch) next.set('q', debouncedSearch);
-        else next.delete('q');
-        next.delete('offset');
-        return next;
-      },
-      { replace: true },
-    );
-  }, [debouncedSearch, currentQ, setParams]);
 
   const emails = useQuery({
     queryKey: queryKeys.emailList(filters),

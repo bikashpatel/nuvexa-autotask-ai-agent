@@ -69,6 +69,8 @@ export interface EditorProps {
   onConflict: (error: ApiError) => void;
   /** An execute/reconcile job is queued and not yet picked up by a worker. */
   queued: boolean;
+  /** The watch on a queued job expired with no visible change (polling stopped). */
+  queueStale?: boolean;
   onQueued: (updatedAt: string) => void;
 }
 
@@ -145,6 +147,7 @@ function useActionEditor<V extends object>(
       }}
       onConflict={onConflict}
       queued={props.queued}
+      queueStale={props.queueStale}
       onQueued={props.onQueued}
     />
   );

@@ -27,6 +27,7 @@ import { StatusBadge } from '../../components/StatusBadge';
 import { TablePagination } from '../../components/TablePagination';
 import { TimeText } from '../../components/TimeText';
 import { ACTION_TYPE_LABELS } from '../../lib/format';
+import { lookup } from '../../lib/lookup';
 import { useHasPermission } from '../auth/session';
 
 const PAGE_SIZE = 25;
@@ -83,7 +84,7 @@ function ActionRow({ action }: { action: ActionOut }) {
   return (
     <Table.Tr>
       <Table.Td>
-        <Text size="sm">{ACTION_TYPE_LABELS[action.action_type] ?? action.action_type}</Text>
+        <Text size="sm">{lookup(ACTION_TYPE_LABELS, action.action_type) ?? action.action_type}</Text>
       </Table.Td>
       <Table.Td maw={340}>
         <Anchor component={Link} to={`/actions/${action.id}`} size="sm" fw={600} lineClamp={2}>

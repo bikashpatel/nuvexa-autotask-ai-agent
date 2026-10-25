@@ -1,5 +1,6 @@
 import { Alert, Card, Text } from '@mantine/core';
 import { IconArchive } from '@tabler/icons-react';
+import { Fragment } from 'react';
 
 import type { EmailDetail, RecipientOut } from '../../api/types';
 import { ExternalLink } from '../../components/ExternalLink';
@@ -7,16 +8,36 @@ import { FactList } from '../../components/LabeledValue';
 import { PlainText } from '../../components/PlainText';
 import { formatDateTime, humanize, personLabel } from '../../lib/format';
 
-function recipients(list: RecipientOut[]): string {
+/**
+ * "Name <address>" with each part bidi-isolated: a U+202E in the (untrusted) display name must not
+ * reorder the address shown after it.
+ */
+function Person({ name, address }: { name: string | null | undefined; address: string | null | undefined }) {
+  if (name && address) {
+    return (
+      <>
+        <bdi>{name}</bdi> &lt;<bdi>{address}</bdi>&gt;
+      </>
+    );
+  }
+  return <bdi>{personLabel(name, address)}</bdi>;
+}
+
+function recipients(list: RecipientOut[]) {
   if (list.length === 0) return '—';
-  return list.map((r) => personLabel(r.name, r.address)).join(', ');
+  return list.map((r, index) => (
+    <Fragment key={`${index}:${r.address}`}>
+      {index > 0 ? ', ' : null}
+      <Person name={r.name} address={r.address} />
+    </Fragment>
+  ));
 }
 
 export function EmailHeaders({ email }: { email: EmailDetail }) {
   return (
     <FactList
       items={[
-        { label: 'From', value: personLabel(email.sender_name, email.sender_address) },
+        { label: 'From', value: <Person name={email.sender_name} address={email.sender_address} /> },
         { label: 'To', value: recipients(email.to_recipients) },
         { label: 'Cc', value: recipients(email.cc_recipients), hidden: email.cc_recipients.length === 0 },
         { label: 'Received', value: formatDateTime(email.received_at) },

@@ -59,6 +59,7 @@ import {
   formatLatency,
   humanize,
 } from '../../lib/format';
+import { isOwnKey } from '../../lib/lookup';
 import { notifyError, notifySuccess } from '../../lib/notify';
 import {
   POLL_INTERVAL_MS,
@@ -149,7 +150,7 @@ function WorkflowStepper({
 function EventItem({ event }: { event: WorkflowEventOut }) {
   const [open, { toggle }] = useDisclosure(false);
   const facts = extractEventFacts(event.details ?? {});
-  const Icon = EVENT_ICONS[event.event_type] ?? IconArrowsExchange;
+  const Icon = isOwnKey(EVENT_ICONS, event.event_type) ? EVENT_ICONS[event.event_type] : IconArrowsExchange;
   const color = eventColor(event);
   const hasDetails = Object.keys(event.details ?? {}).length > 0;
   return (

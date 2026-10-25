@@ -228,6 +228,32 @@ describe('<ActionControls> blocking rules', () => {
       'Queued — waiting for a worker to pick up the job. Status updates automatically.',
     );
   });
+
+  it('an expired watch (queueStale) no longer promises live updates and leaves the buttons to the permissions', () => {
+    renderControls(adoAction({ status: 'approved', current_approval: validApproval }), {
+      queueStale: true,
+    });
+    expect(screen.getByTestId('execute-button')).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Still queued — no worker has picked up the job yet and this page has stopped checking. Reload to check the latest status.',
+    );
+    expect(screen.queryByText(/updates automatically/)).toBeNull();
+  });
+
+  it('an expired watch does not grant buttons the permissions withhold', () => {
+    renderControls(
+      adoAction({
+        status: 'approved',
+        current_approval: validApproval,
+        permissions: { ...ALL_ACTION_PERMISSIONS, can_execute: false, can_reject: false },
+      }),
+      { queueStale: true },
+    );
+    expect(screen.queryByTestId('execute-button')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Cancel proposal' })).toBeEnabled();
+  });
 });
 
 describe('<ActionControls> approve dialog', () => {

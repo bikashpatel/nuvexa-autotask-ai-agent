@@ -12,7 +12,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
-import { RouterProvider, createMemoryRouter } from 'react-router';
+import { Link, RouterProvider, createMemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ActionDetail } from '../api/types';
@@ -89,13 +89,13 @@ async function queueAnExecutionThatIsNeverPickedUp() {
 }
 
 describe('(a) queued-job watch expiry', () => {
-  // DEFECT: after the 120 s watch expires polling stops, but the card still says "Status updates automatically".
+  // Regression (Prompt 5): once the 120 s watch expires the card stops promising live status updates.
   it('stops claiming the status "updates automatically" once polling has stopped', async () => {
     await queueAnExecutionThatIsNeverPickedUp();
     expect(screen.queryByText(/updates automatically/)).toBeNull();
   });
 
-  // DEFECT: after the watch expires `queued` stays true (ActionCard ignores watch.until), so the buttons stay disabled until a reload.
+  // Regression (Prompt 5): the watch expires at watch.until, so the buttons follow the permissions again.
   it('does not leave the decision buttons disabled after the watch has expired', async () => {
     await queueAnExecutionThatIsNeverPickedUp();
     expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled();
@@ -124,7 +124,7 @@ function renderWithHistory(ui: ReactNode, entries: string[], index: number) {
 }
 
 describe('(b) list search boxes follow Back/Forward navigation', () => {
-  // DEFECT: InboxPage seeds its search state from ?q= only on mount (useState), so Back shows the stale query.
+  // Regression (Prompt 5): the Inbox search box follows ?q= on Back/Forward (useUrlTextFilter).
   it('Inbox: Back to ?q=alpha shows "alpha" in the search box (the list is already filtered by alpha)', async () => {
     const { calls } = mockFetch([
       { method: 'GET', path: '/api/v1/emails', handler: () => jsonResponse(page([emailListItem()])) },
@@ -143,7 +143,7 @@ describe('(b) list search boxes follow Back/Forward navigation', () => {
     await waitFor(() => expect(search).toHaveValue('alpha'), { timeout: 1000 });
   });
 
-  // DEFECT: same stale-input pattern when Back/Forward (or a push to the mounted page, e.g. the sidebar "Inbox" link) drops ?q=.
+  // Regression (Prompt 5): Back/Forward to a URL without ?q= clears the Inbox search box.
   it('Inbox: Back to a URL without ?q= clears the search box', async () => {
     mockFetch([
       { method: 'GET', path: '/api/v1/emails', handler: () => jsonResponse(page([emailListItem()])) },
@@ -156,7 +156,7 @@ describe('(b) list search boxes follow Back/Forward navigation', () => {
     await waitFor(() => expect(search).toHaveValue(''), { timeout: 1000 });
   });
 
-  // DEFECT: AuditLogPage seeds its event-type box from ?event_type= only on mount, so Back shows the stale filter.
+  // Regression (Prompt 5): the Audit log event-type box follows ?event_type= on Back/Forward.
   it('Audit log: Back to ?event_type=action.approved shows that value in the event-type box', async () => {
     const { calls } = mockFetch([
       { method: 'GET', path: '/api/v1/audit-events', handler: () => jsonResponse(page([auditEvent()])) },
@@ -176,5 +176,69 @@ describe('(b) list search boxes follow Back/Forward navigation', () => {
       ).toContain('action.approved'),
     );
     await waitFor(() => expect(box).toHaveValue('action.approved'), { timeout: 1000 });
+
+    await act(() => router.navigate(1));
+    await waitFor(() => expect(box).toHaveValue('action.rejected'), { timeout: 1000 });
+  });
+
+  // Regression (Prompt 5): an in-app link pushed onto the mounted page (the sidebar "Inbox" link while filtered) clears the box.
+  it('Inbox: clicking an in-app "Inbox" link while filtered clears the search box and the filter', async () => {
+    const user = userEvent.setup();
+    const { calls } = mockFetch([
+      { method: 'GET', path: '/api/v1/emails', handler: () => jsonResponse(page([emailListItem()])) },
+    ]);
+    const router = renderWithHistory(
+      <>
+        <Link to="/inbox">Inbox</Link>
+        <InboxPage />
+      </>,
+      ['/inbox?q=alpha'],
+      0,
+    );
+    const search = await screen.findByRole('textbox', { name: 'Search' });
+    expect(search).toHaveValue('alpha');
+
+    await user.click(screen.getByRole('link', { name: 'Inbox' }));
+    expect(router.state.location.search).toBe('');
+    await waitFor(() => expect(search).toHaveValue(''), { timeout: 1000 });
+    // The cleared box never pushes the old query back into the URL.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 500)));
+    expect(router.state.location.search).toBe('');
+    const last = callsTo(calls, 'GET', '/api/v1/emails').at(-1)!;
+    expect(queryOf(last).has('q')).toBe(false);
+  });
+
+  // Regression (Prompt 5): an in-app link to a different filter on the mounted page shows that filter in the box.
+  it('Audit log: a link to ?event_type=… on the mounted page shows that value in the event-type box', async () => {
+    const user = userEvent.setup();
+    mockFetch([
+      { method: 'GET', path: '/api/v1/audit-events', handler: () => jsonResponse(page([auditEvent()])) },
+    ]);
+    const router = renderWithHistory(
+      <>
+        <Link to="/audit?event_type=execution.succeeded">Executions</Link>
+        <AuditLogPage />
+      </>,
+      ['/audit'],
+      0,
+    );
+    const box = await screen.findByRole('textbox', { name: 'Event type' });
+    expect(box).toHaveValue('');
+    await user.click(screen.getByRole('link', { name: 'Executions' }));
+    expect(router.state.location.search).toBe('?event_type=execution.succeeded');
+    await waitFor(() => expect(box).toHaveValue('execution.succeeded'), { timeout: 1000 });
+  });
+
+  // Regression (Prompt 5): following the URL never overwrites the box's own debounced pushes.
+  it('Inbox: typing still pushes the debounced value into ?q= (the box keeps what the user typed)', async () => {
+    const user = userEvent.setup();
+    mockFetch([
+      { method: 'GET', path: '/api/v1/emails', handler: () => jsonResponse(page([emailListItem()])) },
+    ]);
+    const router = renderWithHistory(<InboxPage />, ['/inbox'], 0);
+    const search = await screen.findByRole('textbox', { name: 'Search' });
+    await user.type(search, '  outage ');
+    await waitFor(() => expect(router.state.location.search).toBe('?q=outage'));
+    expect(search).toHaveValue('  outage ');
   });
 });

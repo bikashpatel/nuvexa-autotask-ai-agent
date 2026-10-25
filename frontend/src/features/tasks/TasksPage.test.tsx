@@ -13,6 +13,7 @@ import {
   mockFetch,
   queryOf,
   renderWithProviders,
+  textContent,
   type RecordedCall,
   type RenderOptions,
   type Route,
@@ -321,7 +322,7 @@ describe('<TasksPage> reply drafts', () => {
         ]),
     });
     const draft = within(await screen.findByRole('article', { name: 'Re: URGENT: checkout broken' }));
-    expect(draft.getByText(/^To dana@fabrikam\.example ·/)).toBeInTheDocument();
+    expect(draft.getByText(textContent(/^To dana@fabrikam\.example ·/))).toBeInTheDocument();
     expect(draft.getByText(/Hello Dana,/)).toHaveTextContent(XSS_TEXT);
     expect(container.querySelector('article img')).toBeNull();
     expect(container.querySelector('script')).toBeNull();

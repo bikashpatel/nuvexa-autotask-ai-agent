@@ -38,14 +38,18 @@ import type {
   WorkflowDetail,
 } from '../api/types';
 import { ExternalLink } from '../components/ExternalLink';
+import { ActionCard, CurrentApproval } from '../features/actions/ActionCard';
+import { ActionControls } from '../features/actions/ActionControls';
 import { ActionReviewPage } from '../features/actions/ActionReviewPage';
+import { AnalysisPanel } from '../features/actions/AnalysisPanel';
 import { ApprovalsPage } from '../features/approvals/ApprovalsPage';
 import { AuditLogPage } from '../features/audit/AuditLogPage';
 import { LoginPage } from '../features/auth/LoginPage';
 import { EmailDetailPage } from '../features/inbox/EmailDetailPage';
+import { EmailHeaders } from '../features/inbox/EmailParts';
 import { InboxPage } from '../features/inbox/InboxPage';
 import { IntegrationsPage } from '../features/integrations/IntegrationsPage';
-import { OverviewPage } from '../features/overview/OverviewPage';
+import { ActivityFeed, OverviewPage } from '../features/overview/OverviewPage';
 import { AppLayout } from '../features/shell/AppLayout';
 import { TasksPage } from '../features/tasks/TasksPage';
 import { WorkflowDetailPage } from '../features/workflows/WorkflowDetailPage';
@@ -1030,7 +1034,7 @@ describe('post-login redirect target (?redirect_to=) cannot leave the app', () =
     '/\t\\evil.example',
   ];
 
-  // DEFECT: safeRedirectPath accepts "/\t/evil.example" (and \n, \r variants), which resolves to http://evil.example/.
+  // Regression (Prompt 5): safeRedirectPath is an allow-list, so "/\t/evil.example" (and \n, \r variants) fall back to "/".
   it.each(VECTORS.map((v) => [JSON.stringify(v), v]))(
     'safeRedirectPath(%s) stays on this origin',
     (_label, value) => {
@@ -1158,5 +1162,263 @@ describe('bidi overrides and zero-width characters', () => {
     expect(within(card).getByRole('textbox', { name: /^Title/ })).toHaveValue(SPOOF);
     expect(within(card).getByRole('heading', { level: 3 }).textContent).toBe(SPOOF);
     expectNoInjection();
+  });
+});
+
+// Regression (Prompt 5): untrusted values quoted inside trusted sentences are bidi-isolated (<bdi>), so a
+// U+202E (RIGHT-TO-LEFT OVERRIDE) without a closing U+202C cannot reorder the trusted text around it.
+describe('bidi isolation of untrusted values inside trusted sentences', () => {
+  // An unterminated override: without isolation, everything after it in the paragraph renders reversed
+  // (e.g. "v3 · approved" in the reviewer's sentence).
+  const RLO = 'Dana‮ 4v ,devorppa';
+
+  /** `sentence` shows `value` only inside a <bdi> holding exactly that value; nothing leaks outside. */
+  function expectIsolated(sentence: Element | null, value: string) {
+    expect(sentence).not.toBeNull();
+    const isolates = Array.from(sentence!.querySelectorAll('bdi')).map((el) => el.textContent);
+    expect(isolates).toContain(value);
+    const outside = sentence!.cloneNode(true) as Element;
+    for (const el of Array.from(outside.querySelectorAll('bdi'))) el.remove();
+    expect(outside.textContent).not.toContain('‮');
+    // …and the trusted part of the sentence is still there, outside the isolate.
+    expect(outside.textContent?.trim().length).toBeGreaterThan(0);
+  }
+
+  /** The innermost element whose full text matches. */
+  function sentenceMatching(pattern: RegExp): Element {
+    const matches = screen.getAllByText((_, el) => pattern.test(el?.textContent ?? ''));
+    return matches.at(-1)!;
+  }
+
+  const detailRoutes = (detail: ActionDetail, history: AuditEventOut[] = []): Route[] => [
+    { method: 'GET', path: '/api/v1/actions/act-1', handler: () => jsonResponse(detail) },
+    { method: 'GET', path: '/api/v1/actions/act-1/history', handler: () => jsonResponse(history) },
+    {
+      method: 'GET',
+      path: '/api/v1/integrations/azure-devops/projects',
+      handler: () => jsonResponse({ items: [] }),
+    },
+  ];
+
+  it('Approve dialog: the proposal title inside "You are approving … “title”. The approval is bound …"', async () => {
+    const user = userEvent.setup();
+    mockFetch([]);
+    renderWithProviders(
+      <ActionControls
+        action={adoAction({ title: RLO, permissions: ALL_ACTION_PERMISSIONS })}
+        dirty={false}
+        editable={false}
+        saving={false}
+        queued={false}
+        onSave={() => undefined}
+        onDiscard={() => undefined}
+        onConflict={() => undefined}
+        onQueued={() => undefined}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Approve this exact payload?' });
+    const sentence = within(dialog).getByText(
+      (_, el) => el?.tagName === 'P' && /You are approving/.test(el.textContent ?? ''),
+    );
+    expectIsolated(sentence, RLO);
+    expect(sentence.textContent).toMatch(/The approval is bound to this version and payload hash/);
+  });
+
+  it('Action card: reviewer and actor names in the approval banner, approval history and audit trail', async () => {
+    const user = userEvent.setup();
+    const current = approvalFixture({ decided_by_name: RLO });
+    mockFetch(
+      detailRoutes(
+        adoAction({
+          status: 'approved',
+          current_approval: current,
+          approvals: [current],
+          permissions: ALL_ACTION_PERMISSIONS,
+        }),
+        [auditEvent({ actor_name: RLO })],
+      ),
+    );
+    renderWithProviders(<ActionCard actionId="act-1" />);
+    await screen.findByTestId('action-card-act-1');
+    expectIsolated(sentenceMatching(/^Approved by /), RLO);
+
+    await user.click(screen.getByRole('button', { name: 'Approval history (1)' }));
+    expectIsolated(sentenceMatching(/ · v3 · /), RLO);
+
+    await user.click(screen.getByRole('button', { name: 'Audit trail' }));
+    const actor = await screen.findByText(
+      (_, el) =>
+        el?.tagName === 'P' &&
+        (el.textContent ?? '').startsWith(`${RLO} · `) &&
+        !(el.textContent ?? '').includes(' · v3 · '),
+    );
+    expectIsolated(actor, RLO);
+  });
+
+  it('Current approval that is no longer valid: "Approval by <name> is no longer valid"', () => {
+    const stale = approvalFixture({ decided_by_name: RLO, action_version: 2 });
+    renderWithProviders(<CurrentApproval action={adoAction({ version: 3, current_approval: stale })} />);
+    expectIsolated(sentenceMatching(/^Approval by .* is no longer valid$/), RLO);
+  });
+
+  it.each([
+    [RLO, RLO],
+    [null, 'a reviewer'],
+  ])('Save notice: "The previous approval by <%j> (v3) was invalidated …"', async (name, shown) => {
+    const user = userEvent.setup();
+    const current = approvalFixture({ decided_by_name: name });
+    let detail = adoAction({
+      status: 'approved',
+      current_approval: current,
+      approvals: [current],
+      permissions: ALL_ACTION_PERMISSIONS,
+    });
+    mockFetch([
+      ...detailRoutes(detail).map((route) =>
+        route.path === '/api/v1/actions/act-1' ? { ...route, handler: () => jsonResponse(detail) } : route,
+      ),
+      {
+        method: 'PATCH',
+        path: '/api/v1/actions/act-1',
+        handler: () => {
+          detail = {
+            ...detail,
+            status: 'pending_approval',
+            version: 4,
+            payload_hash: 'f'.repeat(64),
+            current_approval: { ...current, invalidated_at: '2026-10-24T10:10:00Z' },
+          };
+          return jsonResponse(detail);
+        },
+      },
+    ]);
+    renderWithProviders(<ActionCard actionId="act-1" />);
+    const title = await screen.findByRole('textbox', { name: /^Title/ });
+    await user.type(title, ' (EU)');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+    const notice = await screen.findByTestId('save-notice');
+    expectIsolated(
+      within(notice).getByText(
+        (_, el) => el?.tagName === 'P' && /previous approval by/.test(el.textContent ?? ''),
+      ),
+      shown,
+    );
+    expect(notice).toHaveTextContent(`The previous approval by ${shown} (v3) was invalidated`);
+  });
+
+  it('Email headers: sender and recipient names before their addresses', () => {
+    renderWithProviders(
+      <EmailHeaders
+        email={emailDetail({
+          sender_name: RLO,
+          sender_address: 'dana@fabrikam.example',
+          to_recipients: [
+            { name: RLO, address: 'support@contoso.example' },
+            { name: null, address: 'ops@contoso.example' },
+          ],
+        })}
+      />,
+    );
+    const from = sentenceMatching(/<dana@fabrikam\.example>$/);
+    expectIsolated(from, RLO);
+    expect(from.textContent).toBe(`${RLO} <dana@fabrikam.example>`);
+    const to = sentenceMatching(/<support@contoso\.example>, ops@contoso\.example$/);
+    expectIsolated(to, RLO);
+    expect(to.textContent).toBe(`${RLO} <support@contoso.example>, ops@contoso.example`);
+  });
+
+  it('AI analysis: the extracted requester name before the requester email', () => {
+    renderWithProviders(
+      <AnalysisPanel
+        analysis={analysis({
+          extraction: {
+            ...analysis().extraction,
+            requester_name: RLO,
+            requester_email: 'dana@fabrikam.example',
+          },
+        })}
+      />,
+    );
+    const requester = sentenceMatching(/ · dana@fabrikam\.example$/);
+    expectIsolated(requester, RLO);
+    expect(requester.textContent).toBe(`${RLO} · dana@fabrikam.example`);
+  });
+
+  it('Overview activity feed: the actor name before the resource type and time', () => {
+    renderWithProviders(<ActivityFeed events={[auditEvent({ actor_name: RLO })]} />);
+    expectIsolated(
+      screen.getByText((_, el) => el?.tagName === 'P' && (el.textContent ?? '').startsWith(`${RLO} · `)),
+      RLO,
+    );
+  });
+
+  it('Reply draft: recipients before the creation time', async () => {
+    mockFetch([
+      { method: 'GET', path: '/api/v1/tasks', handler: () => jsonResponse(page([])) },
+      {
+        method: 'GET',
+        path: '/api/v1/reply-drafts',
+        handler: () =>
+          jsonResponse(page([replyDraftFixture({ to_recipients: [RLO, 'ops@contoso.example'] })])),
+      },
+    ]);
+    renderWithProviders(<TasksPage />, { route: '/?tab=drafts' });
+    const line = await screen.findByText(
+      (_, el) => el?.tagName === 'P' && (el.textContent ?? '').startsWith('To '),
+    );
+    expectIsolated(line, RLO);
+  });
+
+  it('Integrations: mailbox address before the provider, sync folder before the count, organization in the test result', async () => {
+    const user = userEvent.setup();
+    const base = integrationsOut();
+    const [demo] = base.microsoft.connections;
+    mockFetch([
+      {
+        method: 'GET',
+        path: '/api/v1/integrations',
+        handler: () =>
+          jsonResponse(
+            integrationsOut({
+              microsoft: {
+                ...base.microsoft,
+                connections: [{ ...demo!, email: RLO, sync: { ...demo!.sync!, folder: RLO } }],
+              },
+            }),
+          ),
+      },
+      {
+        method: 'GET',
+        path: '/api/v1/integrations/azure-devops/test',
+        handler: () =>
+          jsonResponse({ ok: true, mode: 'mock', organization: RLO, message: 'OK', latency_ms: 12 }),
+      },
+      {
+        method: 'GET',
+        path: '/api/v1/health/ready',
+        handler: () => jsonResponse({ status: 'ok', version: '1', checks: {} }),
+      },
+      { method: 'GET', path: '/api/v1/auth/config', handler: () => jsonResponse(authConfig()) },
+    ]);
+    renderWithProviders(<IntegrationsPage />, { withNotifications: true });
+    await screen.findByRole('region', { name: 'Microsoft 365 mailbox' });
+    expectIsolated(sentenceMatching(/ · Demo mailbox$/), RLO);
+    expectIsolated(sentenceMatching(/ · 42 ingested$/), RLO);
+    await user.click(screen.getByRole('button', { name: 'Test connection' }));
+    expectIsolated(
+      await screen.findByText(
+        (_, el) => el?.tagName === 'P' && /^Mode mock · organization /.test(el.textContent ?? ''),
+      ),
+      RLO,
+    );
+  });
+
+  it('PlainText inline (approval comment, expected impact) is an isolate', () => {
+    const current = approvalFixture({ reason: RLO });
+    renderWithProviders(
+      <CurrentApproval action={adoAction({ status: 'approved', current_approval: current })} />,
+    );
+    expectIsolated(sentenceMatching(/^Comment: /), RLO);
   });
 });

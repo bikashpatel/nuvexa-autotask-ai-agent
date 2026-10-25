@@ -28,6 +28,7 @@ import {
   jsonResponse,
   mockFetch,
   renderWithProviders,
+  textContent,
   type Route,
 } from '../../test/utils';
 import { ActionCard } from './ActionCard';
@@ -290,10 +291,10 @@ describe('<ActionCard> current approval and history', () => {
       ),
     );
     await user.click(await screen.findByRole('button', { name: 'Approval history (2)' }));
-    const invalidated = screen.getByText(/Avery Approver · v3/);
+    const invalidated = screen.getByText(textContent(/Avery Approver · v3/));
     expect(invalidated).toHaveClass('nuvexa-invalidated');
     expect(screen.getByText(/— payload edited/)).toBeInTheDocument();
-    expect(screen.getByText(/Reviewer · v3/)).not.toHaveClass('nuvexa-invalidated');
+    expect(screen.getByText(textContent(/Reviewer · v3/))).not.toHaveClass('nuvexa-invalidated');
     expect(screen.getByText('Wrong project')).toBeInTheDocument();
     expect(screen.getByText('Rejected')).toBeInTheDocument();
   });
@@ -394,7 +395,7 @@ describe('<ActionCard> execution results, audit trail and raw payload', () => {
     );
     expect(await screen.findByText('Action approved')).toBeInTheDocument();
     expect(screen.getByText('Action proposed')).toBeInTheDocument();
-    expect(screen.getByText(/^Agent ·/)).toBeInTheDocument();
+    expect(screen.getByText(textContent(/^Agent ·/))).toBeInTheDocument();
     expect(screen.getByLabelText('Status: Denied')).toBeInTheDocument();
   });
 
@@ -467,7 +468,7 @@ describe('<ActionCard> approve flow', () => {
     expect(await screen.findByLabelText('Status: Approved')).toBeInTheDocument();
     expect(screen.queryByLabelText('Status: Pending approval')).toBeNull();
     expect(screen.getByTestId('execute-button')).toBeEnabled();
-    expect(screen.getByText('Approved by Avery Approver')).toBeInTheDocument();
+    expect(screen.getByText(textContent('Approved by Avery Approver'))).toBeInTheDocument();
   });
 
   it('sends exactly the displayed (non-default) version + payload hash', async () => {
@@ -611,13 +612,15 @@ describe('<ActionCard> save (PATCH) and approval invalidation', () => {
     expect(screen.getByLabelText('Status: Pending approval')).toBeInTheDocument();
     expect(screen.getByLabelText('Version 4')).toBeInTheDocument();
     expect(screen.getByTestId('payload-hash')).toHaveTextContent(HASH_V4.slice(0, 12));
-    expect(screen.getByText('Approval by Avery Approver is no longer valid')).toBeInTheDocument();
+    expect(
+      screen.getByText(textContent('Approval by Avery Approver is no longer valid')),
+    ).toBeInTheDocument();
     // Execute is gone until the new version is approved.
     expect(screen.queryByTestId('execute-button')).toBeNull();
     expect(screen.getByTestId('approve-button')).toBeEnabled();
 
     await user.click(screen.getByRole('button', { name: 'Approval history (1)' }));
-    expect(screen.getByText(/Avery Approver · v3/)).toHaveClass('nuvexa-invalidated');
+    expect(screen.getByText(textContent(/Avery Approver · v3/))).toHaveClass('nuvexa-invalidated');
 
     await user.click(within(notice).getByRole('button', { name: 'Dismiss' }));
     expect(screen.queryByTestId('save-notice')).toBeNull();
@@ -821,6 +824,48 @@ describe('<ActionCard> execute / reconcile (queued jobs, polling with fake timer
     const atDeadline = callsTo(calls, 'GET', DETAIL).length;
     await act(() => vi.advanceTimersByTimeAsync(30_000));
     expect(callsTo(calls, 'GET', DETAIL)).toHaveLength(atDeadline);
+  });
+
+  it('after the watch expires it says polling stopped, re-enables the buttons, and a new execute re-arms it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const approved = adoAction({
+      status: 'approved',
+      current_approval: approval,
+      permissions: ALL_ACTION_PERMISSIONS,
+    });
+    const { calls } = renderCard([
+      ...baseRoutes(() => approved),
+      {
+        method: 'POST',
+        path: `${DETAIL}/execute`,
+        handler: () => jsonResponse({ action: actionSummary({ ...approved }), job_id: 'job-1' }, 202),
+      },
+    ]);
+    await user.click(await screen.findByTestId('execute-button'));
+    await user.click(await screen.findByTestId('confirm-execute'));
+    expect(await screen.findByText(/Queued — waiting for a worker/)).toBeInTheDocument();
+    expect(screen.queryByText(/Still queued/)).toBeNull();
+
+    await act(() => vi.advanceTimersByTimeAsync(121_000));
+    expect(screen.queryByText(/Queued — waiting for a worker/)).toBeNull();
+    expect(screen.getByText(/^Still queued/).closest('[role="status"]')).toHaveTextContent(
+      'Still queued — no worker has picked up the job yet and this page has stopped checking. Reload to check the latest status.',
+    );
+    // The server stays the authority: a repeated execute is absorbed by its idempotency checks.
+    expect(screen.getByTestId('execute-button')).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled();
+
+    // Queueing again re-arms the watch: live message, buttons disabled, polling resumes.
+    await user.click(screen.getByTestId('execute-button'));
+    await user.click(await screen.findByTestId('confirm-execute'));
+    expect(await screen.findByText(/Queued — waiting for a worker/)).toBeInTheDocument();
+    expect(screen.queryByText(/Still queued/)).toBeNull();
+    expect(screen.getByTestId('execute-button')).toBeDisabled();
+    expect(callsTo(calls, 'POST', `${DETAIL}/execute`)).toHaveLength(2);
+    const rearmed = callsTo(calls, 'GET', DETAIL).length;
+    await act(() => vi.advanceTimersByTimeAsync(4000));
+    expect(callsTo(calls, 'GET', DETAIL).length).toBeGreaterThan(rearmed);
   });
 
   it('reconcile: status stays "Uncertain" until the server resolves it', async () => {

@@ -18,6 +18,7 @@ import {
 
 import type { EmailCategory, Priority, Urgency } from '../api/types';
 import { categoryLabel, humanize, priorityLabel, URGENCY_LABELS } from '../lib/format';
+import { isOwnKey, lookup } from '../lib/lookup';
 
 const CATEGORY_ICONS: Record<EmailCategory, typeof IconBug> = {
   incident: IconFlame,
@@ -39,7 +40,7 @@ export function CategoryBadge({ category, ...rest }: { category: string | null |
       </Badge>
     );
   }
-  const Icon = CATEGORY_ICONS[category as EmailCategory] ?? IconCategory;
+  const Icon = isOwnKey(CATEGORY_ICONS, category) ? CATEGORY_ICONS[category] : IconCategory;
   return (
     <Badge variant="default" leftSection={<Icon size={12} aria-hidden />} {...rest}>
       {categoryLabel(category)}
@@ -56,7 +57,7 @@ const PRIORITY_STYLE: Record<Priority, { color: string; icon: typeof IconBug }> 
 
 export function PriorityBadge({ priority, ...rest }: { priority: string | null | undefined } & BadgeProps) {
   if (!priority) return null;
-  const style = PRIORITY_STYLE[priority as Priority] ?? { color: 'gray', icon: IconMinus };
+  const style = lookup(PRIORITY_STYLE, priority) ?? { color: 'gray', icon: IconMinus };
   const Icon = style.icon;
   return (
     <Badge
@@ -74,7 +75,7 @@ export function PriorityBadge({ priority, ...rest }: { priority: string | null |
 export function UrgencyBadge({ urgency, ...rest }: { urgency: Urgency | null | undefined } & BadgeProps) {
   if (!urgency) return null;
   const color = urgency === 'immediate' ? 'red' : urgency === 'high' ? 'orange' : 'gray';
-  const label = URGENCY_LABELS[urgency] ?? humanize(urgency);
+  const label = lookup(URGENCY_LABELS, urgency) ?? humanize(urgency);
   return (
     <Badge variant="outline" color={color} aria-label={`Urgency: ${label}`} {...rest}>
       Urgency: {label}

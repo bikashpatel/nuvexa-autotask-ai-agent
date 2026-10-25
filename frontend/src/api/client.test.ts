@@ -581,6 +581,36 @@ describe('navigation helpers', () => {
     expect(safeRedirectPath('/apiary')).toBe('/apiary');
   });
 
+  // Regression (Prompt 5): an allow-list, not a deny-list — the URL parser strips tab/CR/LF anywhere.
+  it.each([
+    '/\t/evil.example',
+    '/\n/evil.example',
+    '/\r/evil.example',
+    '/ /evil.example',
+    '/inbox\n',
+    '/inbox?q=a\tb',
+    '/inbox\\..\\..\\evil',
+    '/\u0000/evil.example',
+    '/\u007f',
+    '/ /evil.example',
+    '/inbox?q=café',
+    '/／／evil.example',
+  ])('safeRedirectPath rejects %j (whitespace, controls, backslash, non-ASCII)', (value) => {
+    expect(safeRedirectPath(value, '/home')).toBe('/home');
+  });
+
+  it('safeRedirectPath keeps in-app paths built by the app (URLSearchParams "+", hash, sub-delimiters)', () => {
+    for (const path of [
+      '/inbox?q=foo+bar&category=bug',
+      '/audit?event_type=action.approved&offset=50',
+      '/actions/act-1#history',
+      "/emails/e-1?from=a@b.example&tags=(x),y;z:w!~*'$",
+    ]) {
+      expect(safeRedirectPath(path)).toBe(path);
+      expect(new URL(path, window.location.origin).origin).toBe(window.location.origin);
+    }
+  });
+
   it('API_BASE and header names are the documented constants', () => {
     expect(API_BASE).toBe('/api/v1');
     expect(CSRF_COOKIE).toBe('nuvexa_csrf');

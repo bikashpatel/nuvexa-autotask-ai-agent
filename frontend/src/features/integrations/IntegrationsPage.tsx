@@ -67,23 +67,35 @@ function ModeBadge({ mode }: { mode: string }) {
   );
 }
 
-function ConnectionRow({ connection }: { connection: ConnectionOut }) {
+/**
+ * DELETE one of the caller's own connections (the server checks ownership and returns 404 otherwise),
+ * then refetch. Never optimistic: the connection stays listed until the server confirms.
+ */
+function useDisconnect(connectionId: string, closeConfirm: () => void, successMessage: string) {
   const queryClient = useQueryClient();
-  const canSync = useHasPermission('email:sync');
-  const sync = useSyncMailbox();
-  const [confirmOpen, confirm] = useDisclosure(false);
-  const disconnect = useMutation({
-    mutationFn: () => integrationsApi.disconnect(connection.id),
+  return useMutation({
+    mutationFn: () => integrationsApi.disconnect(connectionId),
     onSuccess: () => {
-      confirm.close();
-      notifySuccess('Disconnected', 'Stored tokens were deleted and sync stopped.');
+      closeConfirm();
+      notifySuccess('Disconnected', successMessage);
       void queryClient.invalidateQueries({ queryKey: queryKeys.integrations });
     },
     onError: (error) => {
-      confirm.close();
+      closeConfirm();
       notifyError('Could not disconnect', error);
     },
   });
+}
+
+function ConnectionRow({ connection }: { connection: ConnectionOut }) {
+  const canSync = useHasPermission('email:sync');
+  const sync = useSyncMailbox();
+  const [confirmOpen, confirm] = useDisclosure(false);
+  const disconnect = useDisconnect(
+    connection.id,
+    confirm.close,
+    'Stored tokens were deleted and sync stopped.',
+  );
   const isDemo = connection.provider === 'demo_mailbox';
   return (
     <Card withBorder padding="md" radius="md">
@@ -94,7 +106,7 @@ function ConnectionRow({ connection }: { connection: ConnectionOut }) {
               {connection.display_name ?? connection.email ?? 'Mailbox'}
             </Text>
             <Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>
-              {connection.email ?? '—'} · {humanize(connection.provider)}
+              {connection.email ? <bdi>{connection.email}</bdi> : '—'} · {humanize(connection.provider)}
             </Text>
           </Stack>
           <Group gap="xs">
@@ -133,8 +145,8 @@ function ConnectionRow({ connection }: { connection: ConnectionOut }) {
                 <Group gap={6} wrap="wrap">
                   <StatusBadge kind="sync" status={connection.sync.last_status} size="sm" />
                   <Text size="xs" c="dimmed">
-                    {connection.sync.folder} · {formatInteger(connection.sync.messages_ingested_total)}{' '}
-                    ingested
+                    <bdi>{connection.sync.folder}</bdi> ·{' '}
+                    {formatInteger(connection.sync.messages_ingested_total)} ingested
                   </Text>
                 </Group>
               ) : (
@@ -278,7 +290,69 @@ function MicrosoftCard({ microsoft }: { microsoft: MicrosoftIntegrationOut }) {
   );
 }
 
+/** The caller's own delegated Azure DevOps connection (entra_delegated mode). */
+function AzureDevOpsConnection({ connection }: { connection: ConnectionOut }) {
+  const [confirmOpen, confirm] = useDisclosure(false);
+  const disconnect = useDisconnect(
+    connection.id,
+    confirm.close,
+    'Your stored Azure DevOps tokens were deleted. Reconnect before executing approved work items.',
+  );
+  return (
+    <Card withBorder padding="md" radius="md">
+      <Stack gap="sm">
+        <Group justify="space-between" wrap="wrap" gap="xs">
+          <Stack gap={0} style={{ minWidth: 0 }}>
+            <Text fw={600} style={{ overflowWrap: 'anywhere' }}>
+              {connection.display_name ?? connection.email ?? 'Azure DevOps account'}
+            </Text>
+            <Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>
+              {connection.email ?? '—'}
+            </Text>
+          </Stack>
+          <StatusBadge kind="connection" status={connection.status} size="sm" />
+        </Group>
+        {connection.last_error ? (
+          <Alert color="red" variant="light" p="xs">
+            <Text size="xs" style={{ overflowWrap: 'anywhere' }}>
+              {connection.last_error}
+            </Text>
+          </Alert>
+        ) : null}
+        <FactList
+          labelWidth={150}
+          items={[{ label: 'Connected', value: <TimeText value={connection.connected_at} size="sm" /> }]}
+        />
+        <Button
+          size="xs"
+          variant="subtle"
+          color="red"
+          leftSection={<IconPlugConnectedX size={14} aria-hidden />}
+          onClick={confirm.open}
+          w="fit-content"
+        >
+          Disconnect Azure DevOps
+        </Button>
+      </Stack>
+      <ConfirmModal
+        opened={confirmOpen}
+        onClose={confirm.close}
+        title="Disconnect Azure DevOps?"
+        confirmLabel="Disconnect"
+        confirmColor="red"
+        loading={disconnect.isPending}
+        onConfirm={() => disconnect.mutate()}
+      >
+        NUVEXA deletes your stored (encrypted) Azure DevOps tokens. Approved work items cannot be created on
+        your behalf until you reconnect. Existing work items and the audit history are kept.
+      </ConfirmModal>
+    </Card>
+  );
+}
+
 function AzureDevOpsCard({ ado }: { ado: AzureDevOpsIntegrationOut }) {
+  // Connecting delegates work-item creation to this user's account: the API requires action:execute.
+  const canConnect = useHasPermission('action:execute');
   const [project, setProject] = useState<string | null>(ado.default_project);
   const [loadProjects, setLoadProjects] = useState(false);
 
@@ -338,6 +412,7 @@ function AzureDevOpsCard({ ado }: { ado: AzureDevOpsIntegrationOut }) {
             },
           ]}
         />
+        {ado.connection ? <AzureDevOpsConnection connection={ado.connection} /> : null}
         <Group gap="sm">
           <Button
             variant="light"
@@ -355,7 +430,7 @@ function AzureDevOpsCard({ ado }: { ado: AzureDevOpsIntegrationOut }) {
           >
             List projects
           </Button>
-          {ado.requires_user_connection ? (
+          {ado.requires_user_connection && canConnect ? (
             <Button
               component="a"
               href={navigationUrl('/integrations/azure-devops/connect', '/integrations')}
@@ -375,7 +450,7 @@ function AzureDevOpsCard({ ado }: { ado: AzureDevOpsIntegrationOut }) {
           >
             <Text size="sm">{test.data.message}</Text>
             <Text size="xs" c="dimmed">
-              Mode {test.data.mode} · organization {test.data.organization ?? '—'} ·{' '}
+              Mode {test.data.mode} · organization <bdi>{test.data.organization ?? '—'}</bdi> ·{' '}
               {formatLatency(test.data.latency_ms)}
             </Text>
           </Alert>

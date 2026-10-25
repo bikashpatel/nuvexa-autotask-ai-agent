@@ -5,7 +5,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DashboardSummaryOut } from '../../api/types';
 import { expectNoSeriousA11yViolations } from '../../test/axe';
 import { PERSONAS, auditEvent, dashboardSummary, sessionFor } from '../../test/fixtures';
-import { callsTo, errorResponse, jsonResponse, mockFetch, renderWithProviders } from '../../test/utils';
+import {
+  callsTo,
+  errorResponse,
+  jsonResponse,
+  mockFetch,
+  renderWithProviders,
+  textContent,
+} from '../../test/utils';
 import { ActivityFeed, OverviewPage } from './OverviewPage';
 
 const SUMMARY = '/api/v1/dashboard/summary';
@@ -234,9 +241,9 @@ describe('<ActivityFeed>', () => {
     expect(screen.getByLabelText('Status: Success')).toBeInTheDocument();
     expect(screen.getByLabelText('Status: Failure')).toBeInTheDocument();
     expect(screen.getByLabelText('Status: Denied')).toBeInTheDocument();
-    expect(screen.getByText(/Agent · Workflow run ·/)).toBeInTheDocument();
-    expect(screen.getByText(/System · Session ·/)).toBeInTheDocument();
-    expect(screen.getByText(/Avery Approver · Action ·/)).toBeInTheDocument();
+    expect(screen.getByText(textContent(/Agent · Workflow run ·/))).toBeInTheDocument();
+    expect(screen.getByText(textContent(/System · Session ·/))).toBeInTheDocument();
+    expect(screen.getByText(textContent(/Avery Approver · Action ·/))).toBeInTheDocument();
     // Outcome-specific bullet icons.
     expect(container.querySelector('.tabler-icon-circle-check')).not.toBeNull();
     expect(container.querySelector('.tabler-icon-x')).not.toBeNull();

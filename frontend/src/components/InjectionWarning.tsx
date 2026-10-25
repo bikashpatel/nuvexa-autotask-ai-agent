@@ -3,6 +3,7 @@ import { IconShieldExclamation } from '@tabler/icons-react';
 
 import type { InjectionFlag } from '../api/types';
 import { humanize } from '../lib/format';
+import { lookup } from '../lib/lookup';
 
 const SEVERITY_COLOR: Record<InjectionFlag['severity'], string> = {
   high: 'red',
@@ -42,7 +43,7 @@ export function InjectionWarning({ flags }: { flags: InjectionFlag[] | null | un
           {flags.map((flag, index) => (
             <List.Item key={`${flag.rule}-${index}`}>
               <Group gap="xs" wrap="wrap" align="flex-start">
-                <Badge color={SEVERITY_COLOR[flag.severity]} variant="white" size="sm">
+                <Badge color={lookup(SEVERITY_COLOR, flag.severity) ?? 'gray'} variant="white" size="sm">
                   {flag.severity}
                 </Badge>
                 <Text size="sm" fw={600}>
