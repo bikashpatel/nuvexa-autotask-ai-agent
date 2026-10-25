@@ -46,8 +46,9 @@ def _split_csv(value: object) -> object:
 
 CsvList = Annotated[list[str], NoDecode]
 
+# `\Z`, not `$`: `$` also matches before a trailing newline (same bug class as `safe_redirect_path`).
 _ORIGIN_RE = re.compile(
-    r"^https?://(localhost|\[[0-9a-fA-F:]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)(:\d{1,5})?$"
+    r"^https?://(localhost|\[[0-9a-fA-F:]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)(:\d{1,5})?\Z"
 )
 
 

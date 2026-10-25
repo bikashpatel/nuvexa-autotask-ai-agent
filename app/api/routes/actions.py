@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import or_, select
 
-from app.api.deps import ActorDep, SessionDep, SettingsDep, rate_limit
+from app.api.deps import ActorDep, Offset, SessionDep, SettingsDep, rate_limit
 from app.api.presenters import action_detail, action_out, audit_out
 from app.core.errors import InvalidStateTransition
 from app.db.models import ActionExecution, AuditEvent, ProposedAction
@@ -41,7 +41,7 @@ async def list_actions(
     actor: ActorDep,
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Offset = 0,
     status_filter: Annotated[list[ActionStatus] | None, Query(alias="status")] = None,
     action_type: ActionType | None = None,
     workflow_run_id: uuid.UUID | None = None,

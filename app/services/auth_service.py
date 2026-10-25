@@ -7,6 +7,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
 import msal
 from sqlalchemy import select, update
@@ -19,6 +20,7 @@ from app.core.timeutil import utcnow
 from app.db.models import ConnectedAccount, OAuthState, Tenant, User, UserSession
 from app.demo import DEMO_PERSONAS, DEMO_TENANT
 from app.domain.enums import (
+    ActorType,
     AuditOutcome,
     ConnectionProvider,
     ConnectionStatus,
@@ -53,6 +55,22 @@ def safe_redirect_path(value: str | None, default: str = "/") -> str:
     if value and len(value) <= 300 and _SAFE_REDIRECT_RE.match(value):
         return value
     return default
+
+
+async def _refuse_login(session: AsyncSession, user: User, *, actor: Actor | None, details: dict[str, Any]) -> None:
+    """Audit a refused sign-in to `user` and commit it: the caller rolls its own transaction back on failure."""
+    record_audit(
+        session,
+        tenant_id=user.tenant_id,
+        actor=actor,
+        actor_type=ActorType.USER,
+        event_type="login",
+        resource_type="user",
+        resource_id=user.id,
+        outcome=AuditOutcome.DENIED,
+        details=details,
+    )
+    await session.commit()
 
 
 @dataclass
@@ -171,6 +189,14 @@ class DemoAuthService:
             )
             session.add(user)
             await session.flush()
+        elif not user.is_active:
+            await _refuse_login(
+                session,
+                user,
+                actor=actor_from_user(user, ip),
+                details={"method": "demo", "persona": persona, "reason": "deactivated"},
+            )
+            raise PermissionDenied("This user is deactivated.")
         account = (
             await session.execute(
                 select(ConnectedAccount).where(
@@ -360,6 +386,8 @@ class EntraAuthService:
             )
             session.add(tenant)
             await session.flush()
+        # The stable identity is (tid, oid). The `email` / `preferred_username` claims are mutable and unverified,
+        # so they may only link a pre-provisioned account that no Entra identity owns yet ("nOAuth").
         user = (
             await session.execute(select(User).where(User.tenant_id == tenant.id, User.entra_object_id == oid))
         ).scalar_one_or_none()
@@ -367,18 +395,25 @@ class EntraAuthService:
             user = (
                 await session.execute(select(User).where(User.tenant_id == tenant.id, User.email == email))
             ).scalar_one_or_none()
-        role = UserRole.ADMIN if email in self.settings.bootstrap_admin_emails else UserRole.MEMBER
+            if user is not None and user.entra_object_id is not None:
+                await self._refuse_entra_login(session, user, oid=oid, ip=ip, reason="identity_mismatch")
+                raise PermissionDenied("This Microsoft account is not allowed to sign in.")
+        # Bootstrap only when the account is created or first bound; never re-elevate on later sign-ins.
+        bootstrap = email in self.settings.bootstrap_admin_emails
         if user is None:
+            role = UserRole.ADMIN if bootstrap else UserRole.MEMBER
             user = User(tenant_id=tenant.id, email=email, display_name=name, entra_object_id=oid, role=role)
             session.add(user)
             await session.flush()
         else:
             if not user.is_active:
+                await self._refuse_entra_login(session, user, oid=oid, ip=ip, reason="deactivated")
                 raise PermissionDenied("This user is deactivated.")
-            user.entra_object_id = oid
+            if user.entra_object_id is None:  # first sign-in of a pre-provisioned account binds it
+                user.entra_object_id = oid
+                if bootstrap:
+                    user.role = UserRole.ADMIN
             user.display_name = name
-            if role is UserRole.ADMIN:
-                user.role = UserRole.ADMIN
         record_audit(
             session,
             tenant_id=tenant.id,
@@ -389,6 +424,14 @@ class EntraAuthService:
             details={"method": "entra"},
         )
         return user
+
+    @staticmethod
+    async def _refuse_entra_login(session: AsyncSession, user: User, *, oid: str, ip: str | None, reason: str) -> None:
+        details: dict[str, Any] = {"method": "entra", "reason": reason, "object_id": oid}
+        if user.entra_object_id == oid:  # the account's own identity: attribute the attempt to it
+            await _refuse_login(session, user, actor=actor_from_user(user, ip), details=details)
+        else:  # another (or a not yet bound) identity: never attribute it to the account it tried to reach
+            await _refuse_login(session, user, actor=None, details={**details, "ip_address": ip})
 
 
 async def disconnect_account(session: AsyncSession, actor: Actor, account_id: uuid.UUID, settings: Settings) -> None:

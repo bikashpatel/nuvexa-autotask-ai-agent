@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from sqlalchemy import func, select
 
-from app.api.deps import ActorDep, SessionDep, SettingsDep
+from app.api.deps import ActorDep, Offset, SessionDep, SettingsDep
 from app.api.presenters import audit_out
 from app.core.timeutil import utcnow
 from app.db.models import (
@@ -51,7 +51,6 @@ router = APIRouter(tags=["workspace"])
 log = get_logger(__name__)
 
 Limit = Annotated[int, Query(ge=1, le=100)]
-Offset = Annotated[int, Query(ge=0)]
 
 
 @router.get("/tasks", response_model=Page[FollowUpTaskOut])

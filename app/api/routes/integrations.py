@@ -12,7 +12,7 @@ from app.api.routes.auth import _redirect_with_binding
 from app.core.config import AzureDevOpsMode, LLMProvider
 from app.core.errors import AppError, Conflict
 from app.db.models import ConnectedAccount, EmailMessage, EmailSyncCheckpoint, User
-from app.domain.enums import ActionType, ConnectionProvider, OAuthPurpose
+from app.domain.enums import ActionType, ConnectionProvider, ConnectionStatus, OAuthPurpose
 from app.integrations.azure_devops.base import FieldIssue
 from app.integrations.azure_devops.mapping import build_create_request
 from app.integrations.microsoft_graph.base import GRAPH_MAIL_SCOPES
@@ -67,6 +67,15 @@ async def integrations(actor: ActorDep, session: SessionDep, settings: SettingsD
     user_connected = True
     if ado_mode is AzureDevOpsMode.ENTRA_DELEGATED:
         user_connected = await find_active_account(session, actor, ConnectionProvider.AZURE_DEVOPS) is not None
+    # The user's own delegated Azure DevOps grant (it holds stored tokens), so the dashboard can revoke it.
+    ado_connection = next(
+        (
+            c
+            for c in reversed(connections)
+            if c.provider is ConnectionProvider.AZURE_DEVOPS and c.status is not ConnectionStatus.DISCONNECTED
+        ),
+        None,
+    )
     return IntegrationsOut(
         microsoft=MicrosoftIntegrationOut(
             mode=settings.mail_mode.value,
@@ -80,6 +89,7 @@ async def integrations(actor: ActorDep, session: SessionDep, settings: SettingsD
             configured=ado_mode is AzureDevOpsMode.MOCK or bool(settings.azure_devops_organization),
             requires_user_connection=ado_mode is AzureDevOpsMode.ENTRA_DELEGATED,
             user_connected=user_connected,
+            connection=ado_connection,
             default_project=ts.azure_devops.project,
             default_work_item_type=ts.azure_devops.work_item_type,
             api_version=settings.azure_devops_api_version,
@@ -108,6 +118,8 @@ async def _connect(
 async def connect_microsoft(
     actor: ActorDep, session: SessionDep, settings: SettingsDep, redirect_to: str | None = None
 ) -> RedirectResponse:
+    # Stores Mail.Read tokens: only for roles that may sync mail (viewers are read-only).
+    require(actor, Perm.EMAIL_SYNC, resource_type="mailbox")
     return await _connect(OAuthPurpose.CONNECT_MAILBOX, actor.user_id, session, settings, redirect_to)
 
 
@@ -115,6 +127,8 @@ async def connect_microsoft(
 async def connect_azure_devops(
     actor: ActorDep, session: SessionDep, settings: SettingsDep, redirect_to: str | None = None
 ) -> RedirectResponse:
+    # Stores user_impersonation tokens, used only to execute approved work items.
+    require(actor, Perm.ACTION_EXECUTE, resource_type="azure_devops")
     if settings.azure_devops_mode is not AzureDevOpsMode.ENTRA_DELEGATED:
         raise Conflict("Azure DevOps user connection is only used in entra_delegated mode.")
     return await _connect(OAuthPurpose.CONNECT_AZURE_DEVOPS, actor.user_id, session, settings, redirect_to)

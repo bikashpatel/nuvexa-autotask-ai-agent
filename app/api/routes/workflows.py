@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
 
-from app.api.deps import ActorDep, SessionDep, SettingsDep, rate_limit
+from app.api.deps import ActorDep, Offset, SessionDep, SettingsDep, rate_limit
 from app.api.presenters import action_out, run_out
 from app.core.errors import NotFound
 from app.db.models import EmailAnalysis, EmailMessage, ProposedAction, WorkflowEvent, WorkflowRun
@@ -47,7 +47,7 @@ async def list_runs(
     actor: ActorDep,
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Offset = 0,
     status_filter: Annotated[WorkflowStatus | None, Query(alias="status")] = None,
     email_id: uuid.UUID | None = None,
 ) -> Page[WorkflowRunOut]:

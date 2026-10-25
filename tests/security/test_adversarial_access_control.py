@@ -11,6 +11,7 @@ authentication, CSRF and permission sweeps cover endpoints that nobody remembere
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
@@ -38,7 +39,15 @@ from app.db.models import (
     UserSession,
 )
 from app.db.session import Database
-from app.domain.enums import ActorType, AuditOutcome, ConnectionProvider, JobStatus, JobType, UserRole
+from app.domain.enums import (
+    ActorType,
+    AuditOutcome,
+    ConnectionProvider,
+    ConnectionStatus,
+    JobStatus,
+    JobType,
+    UserRole,
+)
 from app.integrations.http import RetryPolicy
 from app.integrations.microsoft_graph.id_token import HttpJwksFetcher, IdTokenValidator
 from app.integrations.microsoft_graph.oauth import EntraOAuthClient
@@ -100,8 +109,9 @@ ROUTE_PERMISSION: dict[tuple[str, str], str | None] = {
     ("POST", f"{P}/auth/logout"): None,
     ("GET", f"{P}/auth/me"): None,
     ("GET", f"{P}/integrations"): None,
-    ("GET", f"{P}/integrations/microsoft/connect"): None,
-    ("GET", f"{P}/integrations/azure-devops/connect"): None,
+    # Connecting stores delegated tokens: only roles that may use them (viewers are read-only, docs/api.md).
+    ("GET", f"{P}/integrations/microsoft/connect"): "email:sync",
+    ("GET", f"{P}/integrations/azure-devops/connect"): "action:execute",
     ("DELETE", f"{P}/integrations/connections/{{connection_id}}"): None,  # own connections only
     ("GET", f"{P}/integrations/azure-devops/test"): "action:edit",
     ("GET", f"{P}/integrations/azure-devops/projects"): "action:edit",
@@ -535,7 +545,7 @@ async def test_pagination_parameters_are_bounded(harness: Harness) -> None:
         assert page["items"] == []
 
 
-# DEFECT: `offset` is only `Query(ge=0)`; values >= 2**63 overflow the DB driver and the API answers 500, not 422.
+# Regression (Prompt 5): `offset` is the shared bounded `Offset` alias (le=1_000_000), so huge values are a 422.
 async def test_huge_offsets_are_rejected_or_empty_never_a_server_error(harness: Harness) -> None:
     member = await harness.persona("member")
     app = harness.client._transport.app  # type: ignore[attr-defined]
@@ -729,7 +739,7 @@ VICTIM_OID = "aaaaaaaa-0000-4000-8000-00000000000a"
 ATTACKER_OID = "bbbbbbbb-0000-4000-8000-00000000000b"
 
 
-# DEFECT: Entra sign-in falls back to an e-mail-claim lookup and re-binds a user that is already bound to another oid.
+# Regression (Prompt 5): the e-mail claim links only a not-yet-bound account; one bound to another oid is refused.
 async def test_another_entra_identity_cannot_take_over_an_account_through_the_email_claim(
     make_harness: HarnessFactory, entra: FakeEntra
 ) -> None:
@@ -753,6 +763,103 @@ async def test_another_entra_identity_cannot_take_over_an_account_through_the_em
         row = await s.get(User, uuid.UUID(victim_id))
     assert row is not None
     assert (row.entra_object_id, row.display_name) == (VICTIM_OID, "Dana Admin")
+
+
+VICTIM_EMAIL = "dana.admin@contoso.example"
+
+
+def _as(entra: FakeEntra, oid: str, email: str = VICTIM_EMAIL, name: str = "Dana Admin") -> FakeEntra:
+    entra.identity = FakeIdentity(oid=oid, email=email, name=name)
+    return entra
+
+
+async def test_a_refused_identity_takeover_is_audited_and_the_owner_keeps_access(
+    make_harness: HarnessFactory, entra: FakeEntra
+) -> None:
+    h = await make_harness(**ENTRA, bootstrap_admin_emails=[VICTIM_EMAIL])
+    victim = h.tracked_client()
+    await entra_login(victim, _as(entra, VICTIM_OID))
+    victim_id = (await victim.get(f"{API}/auth/me")).json()["user"]["id"]
+
+    attacker = h.tracked_client()
+    resp = await entra_login(attacker, _as(entra, ATTACKER_OID, name="Mallory"))
+    assert _error_of(resp) == "permission_denied"
+    assert h.settings.session_cookie_name not in resp.headers.get("set-cookie", "")
+    assert_error(await attacker.get(f"{API}/auth/me"), 401, "authentication_required")
+    [denied] = await h.audit_events(event_type="login", outcome=AuditOutcome.DENIED)
+    assert (denied.actor_user_id, denied.resource_type, denied.resource_id) == (None, "user", victim_id)
+    assert (denied.details["reason"], denied.details["object_id"]) == ("identity_mismatch", ATTACKER_OID)
+    async with h.db.session() as s:
+        users = (await s.execute(select(User))).scalars().all()
+    assert [(str(u.id), u.entra_object_id) for u in users] == [(victim_id, VICTIM_OID)]  # nothing created or re-bound
+
+    owner = h.tracked_client()  # the real owner is unaffected
+    await entra_login(owner, _as(entra, VICTIM_OID))
+    assert (await owner.get(f"{API}/auth/me")).json()["user"] == (await victim.get(f"{API}/auth/me")).json()["user"]
+
+
+async def test_the_bootstrap_admin_e_mail_claim_never_re_elevates_or_re_binds_an_account(
+    make_harness: HarnessFactory, entra: FakeEntra
+) -> None:
+    h = await make_harness(**ENTRA, bootstrap_admin_emails=[VICTIM_EMAIL, "erin.invited@contoso.example"])
+    first = h.tracked_client()
+    await entra_login(first, _as(entra, VICTIM_OID))
+    me = (await first.get(f"{API}/auth/me")).json()["user"]
+    assert me["role"] == "admin"  # the documented first-admin bootstrap still works for a new account
+    async with h.db.session() as s:  # an administrator demotes the account
+        await s.execute(update(User).where(User.id == uuid.UUID(me["id"])).values(role=UserRole.MEMBER))
+        await s.commit()
+    again = h.tracked_client()
+    await entra_login(again, _as(entra, VICTIM_OID))
+    assert (await again.get(f"{API}/auth/me")).json()["user"]["role"] == "member"  # the e-mail claim restores nothing
+
+    # A pre-provisioned (invited) account is bound to the first verified identity, then never to another one.
+    invited = await h.create_user(
+        uuid.UUID(me["tenant_id"]), UserRole.VIEWER, email="erin.invited@contoso.example", demo_mailbox=False
+    )
+    erin = h.tracked_client()
+    await entra_login(erin, _as(entra, "cccccccc-0000-4000-8000-00000000000c", "erin.invited@contoso.example", "Erin"))
+    erin_me = (await erin.get(f"{API}/auth/me")).json()["user"]
+    assert (erin_me["id"], erin_me["role"]) == (str(invited.id), "admin")  # bootstrap applies at first binding only
+    mallory = h.tracked_client()
+    resp = await entra_login(mallory, _as(entra, ATTACKER_OID, "erin.invited@contoso.example", "Mallory"))
+    assert _error_of(resp) == "permission_denied"
+    async with h.db.session() as s:
+        row = await s.get(User, invited.id)
+    assert row is not None
+    assert (row.entra_object_id, row.display_name) == ("cccccccc-0000-4000-8000-00000000000c", "Erin")
+
+
+async def test_a_deactivated_demo_persona_cannot_sign_in(harness: Harness) -> None:
+    member = await harness.persona("member")
+    viewer = await harness.persona("viewer")
+    async with harness.db.session() as s:
+        await s.execute(update(User).where(User.id == member.user_id).values(is_active=False))
+        await s.commit()
+    browser = harness.tracked_client()
+    resp = await browser.post(f"{API}/auth/demo-login", json={"persona": "member"})
+    assert_error(resp, 403, "permission_denied")
+    assert "set-cookie" not in resp.headers
+    assert_error(await browser.get(f"{API}/auth/me"), 401, "authentication_required")
+    events = await harness.audit_events(event_type="login", actor_user_id=member.user_id)
+    assert [e.outcome for e in events] == [AuditOutcome.SUCCESS, AuditOutcome.DENIED]
+    assert events[-1].details == {"method": "demo", "persona": "member", "reason": "deactivated"}
+    # A refused attempt from a browser that holds another session neither replaces nor revokes it.
+    assert_error(await viewer.client.post(f"{API}/auth/demo-login", json={"persona": "member"}), 403)
+    assert (await viewer.get("/auth/me")).json()["user"]["role"] == "viewer"
+
+
+async def test_a_failed_sign_in_logs_its_error_code_unredacted(
+    make_harness: HarnessFactory, entra: FakeEntra, capsys: pytest.CaptureFixture[str]
+) -> None:
+    h = await make_harness(**ENTRA, log_format="json")
+    await _begin(h.client, entra)
+    capsys.readouterr()
+    assert _error_of(await _callback(h.client, code="c", state="forged-state")) == "permission_denied"
+    out = capsys.readouterr()
+    [line] = [json.loads(raw) for raw in (out.out + out.err).splitlines() if '"oauth_callback_failed"' in raw]
+    assert line["error_code"] == "permission_denied"
+    assert "code" not in line
 
 
 async def test_connect_flows_are_bound_to_the_initiating_session_and_same_site(
@@ -990,8 +1097,7 @@ async def _ado_connected_member(h: Harness, entra: FakeEntra) -> tuple[Persona, 
 ADO_DELEGATED = {**ENTRA, "azure_devops_mode": "entra_delegated", "azure_devops_organization": "contoso"}
 
 
-# DEFECT: GET /integrations drops the Azure DevOps grant from `connections` and exposes no id for it anywhere, so
-# the dashboard cannot offer DELETE /integrations/connections/{id} to revoke the stored delegated tokens.
+# Regression (Prompt 5): GET /integrations reports the user's own Azure DevOps grant as `azure_devops.connection`.
 async def test_the_azure_devops_delegated_connection_id_is_discoverable(
     make_harness: HarnessFactory, entra: FakeEntra
 ) -> None:
@@ -1017,6 +1123,55 @@ async def test_the_azure_devops_delegated_connection_can_be_revoked_by_its_owner
             await s.execute(select(CredentialRecord).where(CredentialRecord.connected_account_id == ado_id))
         ).all()
     assert stored == []
+
+
+async def test_the_azure_devops_connection_is_reported_to_its_owner_only_until_revoked(
+    make_harness: HarnessFactory, entra: FakeEntra
+) -> None:
+    h = await make_harness(**ADO_DELEGATED)
+    member, ado_id = await _ado_connected_member(h, entra)
+    overview = (await member.get("/integrations")).json()
+    conn = overview["azure_devops"]["connection"]
+    assert (conn["id"], conn["provider"], conn["status"], conn["sync"]) == (str(ado_id), "azure_devops", "active", None)
+    assert all(c["provider"] != "azure_devops" for c in overview["microsoft"]["connections"])
+    assert entra.access_token not in json.dumps(overview)  # an id and metadata, never the stored tokens
+    for persona in ("approver", "admin"):  # tenant-wide roles do not see another user's grant
+        other = await (await h.persona(persona)).get("/integrations")
+        assert other.json()["azure_devops"]["connection"] is None
+        assert str(ado_id) not in other.text
+
+    # A grant that needs re-consent still holds stored tokens, so it stays revocable.
+    async with h.db.session() as s:
+        await s.execute(
+            update(ConnectedAccount).where(ConnectedAccount.id == ado_id).values(status=ConnectionStatus.NEEDS_REAUTH)
+        )
+        await s.commit()
+    ado = (await member.get("/integrations")).json()["azure_devops"]
+    assert (ado["user_connected"], ado["connection"]["status"]) == (False, "needs_reauth")
+    assert (await member.delete(f"/integrations/connections/{ado_id}")).status_code == 204
+    ado = (await member.get("/integrations")).json()["azure_devops"]
+    assert (ado["user_connected"], ado["connection"]) == (False, None)
+
+
+@pytest.mark.parametrize(
+    ("path", "permission"),
+    [("/integrations/microsoft/connect", "email:sync"), ("/integrations/azure-devops/connect", "action:execute")],
+)
+async def test_viewers_cannot_store_delegated_mailbox_or_azure_devops_tokens(
+    make_harness: HarnessFactory, entra: FakeEntra, path: str, permission: str
+) -> None:
+    h = await make_harness(**ADO_DELEGATED, mail_mode="graph")
+    viewer = await h.persona("viewer")
+    resp = await viewer.get(path)
+    assert_error(resp, 403, "permission_denied")
+    assert OAUTH_BINDING_COOKIE not in resp.headers.get("set-cookie", "")
+    assert entra.flows_started == []  # no consent prompt is even started
+    [denial] = await h.audit_events(event_type="permission_denied", actor_user_id=viewer.user_id)
+    assert denial.details["permission"] == permission
+    async with h.db.session() as s:
+        assert (await s.execute(select(func.count()).select_from(OAuthState))).scalar_one() == 0
+    member = await h.persona("member")  # positive control: roles that use the tokens may connect
+    assert (await member.get(path)).status_code == 302
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -1068,6 +1223,13 @@ async def test_cors_allowed_origin_cannot_preflight_unlisted_methods_or_headers(
     ok = await cors_client.get(f"{API}/auth/config", headers={"Origin": ALLOWED_ORIGIN})
     assert ok.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
     assert "origin" in ok.headers.get("vary", "").lower()  # caches must not serve one origin's answer to another
+
+
+@pytest.mark.parametrize("origin", ["https://app.example.com\n", "http://localhost:5173\n", "https://[::1]:8443\n"])
+def test_cors_origins_with_a_trailing_newline_are_rejected(origin: str) -> None:
+    # `$` also matches before a final newline (same bug class as safe_redirect_path); a list is not stripped.
+    with pytest.raises(ValidationError, match="must be an exact origin"):
+        make_settings("sqlite+aiosqlite://", cors_allowed_origins=[origin])
 
 
 @pytest.mark.parametrize("origin", ["http://localhost:5173", "http://127.0.0.1:5173", "http://[::1]:5173"])

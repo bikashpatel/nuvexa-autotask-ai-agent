@@ -487,6 +487,24 @@ async def test_demo_login_provisions_tenant_user_and_mailbox(
     assert audit.outcome is AuditOutcome.SUCCESS
 
 
+async def test_demo_login_refuses_a_deactivated_persona_and_audits_it(
+    session: AsyncSession, settings: Settings, fresh: Fresh
+) -> None:
+    service = DemoAuthService(settings)
+    user = await service.login(session, "member")
+    await session.commit()
+    user.is_active = False
+    await session.commit()
+    with pytest.raises(PermissionDenied, match="deactivated"):
+        await service.login(session, "member", ip=IP)
+    await session.rollback()  # what the request does on failure: only the audit event was committed
+    events = await fresh.audits("login", actor_user_id=user.id)
+    assert [e.outcome for e in events] == [AuditOutcome.SUCCESS, AuditOutcome.DENIED]
+    assert (events[-1].ip_address, events[-1].resource_id) == (IP, str(user.id))
+    assert events[-1].details == {"method": "demo", "persona": "member", "reason": "deactivated"}
+    assert len(await fresh.all(ConnectedAccount, ConnectedAccount.user_id == user.id)) == 1
+
+
 async def test_demo_login_is_idempotent(session: AsyncSession, settings: Settings, fresh: Fresh) -> None:
     service = DemoAuthService(settings)
     first = await service.login(session, "member")
@@ -803,7 +821,7 @@ async def test_login_links_existing_user_by_email(
     assert user.id == invited.id
     stored = await fresh.get(User, invited.id)
     assert stored is not None
-    assert stored.entra_object_id == OID
+    assert (stored.entra_object_id, stored.role) == (OID, UserRole.MEMBER)  # not on the bootstrap list
 
 
 async def test_login_bootstrap_admin_for_new_user(session: AsyncSession, database_url: str, fresh: Fresh) -> None:
@@ -851,7 +869,83 @@ async def test_login_refuses_deactivated_user(
     assert stored is not None
     assert stored.is_active is False
     assert stored.entra_object_id is None
-    assert await fresh.audits("login") == []
+    # The refusal is audited (committed despite the rollback) and never as a successful login.
+    [denied] = await fresh.audits("login")
+    assert (denied.outcome, denied.actor_user_id, denied.resource_id) == (AuditOutcome.DENIED, None, str(gone_id))
+    assert denied.details == {"method": "entra", "reason": "deactivated", "object_id": OID, "ip_address": IP}
+
+
+async def test_login_refuses_deactivated_user_bound_to_this_identity_and_attributes_it(
+    session: AsyncSession, entra_settings: Settings, factory: Factory, fresh: Fresh
+) -> None:
+    tenant = await factory.tenant("Contoso", entra_tenant_id=TENANT_A)
+    gone = await factory.user(tenant, UserRole.MEMBER, email="renamed@contoso.example", active=False)
+    gone.entra_object_id = OID
+    await session.commit()
+    service, _oauth = _service(entra_settings)
+    params, binding = await _begin_flow(service, session)
+    with pytest.raises(PermissionDenied, match="deactivated"):
+        await service.complete(session, params, binding=binding, current_user=None, ip=IP)
+    await session.rollback()
+    [denied] = await fresh.audits("login")
+    assert (denied.outcome, denied.actor_user_id, denied.ip_address) == (AuditOutcome.DENIED, gone.id, IP)
+    assert denied.details == {"method": "entra", "reason": "deactivated", "object_id": OID}
+    stored = await fresh.get(User, gone.id)
+    assert stored is not None
+    assert stored.display_name == "Test member"  # nothing about the account changed
+
+
+async def test_login_refuses_an_email_match_bound_to_another_identity(
+    session: AsyncSession, database_url: str, factory: Factory, fresh: Fresh
+) -> None:
+    tenant = await factory.tenant("Contoso", entra_tenant_id=TENANT_A)
+    owner = await factory.user(tenant, UserRole.MEMBER, email=LOGIN_EMAIL)
+    owner.entra_object_id = "44444444-4444-4444-4444-444444444444"
+    await session.commit()
+    admin_settings = make_settings(
+        database_url,
+        entra_client_id="client",
+        entra_client_secret="not-a-real-secret",
+        entra_tenant_id=TENANT_A,
+        bootstrap_admin_emails=LOGIN_EMAIL,  # not even the bootstrap list may hand the account over
+    )
+    service, _oauth = _service(admin_settings)  # presents OID with the owner's e-mail claim
+    params, binding = await _begin_flow(service, session)
+    with pytest.raises(PermissionDenied, match="not allowed to sign in"):
+        await service.complete(session, params, binding=binding, current_user=None, ip=IP)
+    await session.rollback()
+    stored = await fresh.get(User, owner.id)
+    assert stored is not None
+    assert (stored.entra_object_id, stored.display_name, stored.role) == (
+        "44444444-4444-4444-4444-444444444444",
+        "Test member",
+        UserRole.MEMBER,
+    )
+    assert len(await fresh.all(User, User.tenant_id == tenant.id)) == 1
+    [denied] = await fresh.audits("login")
+    assert (denied.outcome, denied.actor_user_id, denied.resource_id) == (AuditOutcome.DENIED, None, str(owner.id))
+    assert denied.details == {"method": "entra", "reason": "identity_mismatch", "object_id": OID, "ip_address": IP}
+
+
+async def test_login_bootstrap_admin_never_re_elevates_a_bound_user(
+    session: AsyncSession, database_url: str, factory: Factory, fresh: Fresh
+) -> None:
+    tenant = await factory.tenant("Contoso", entra_tenant_id=TENANT_A)
+    demoted = await factory.user(tenant, UserRole.MEMBER, email=LOGIN_EMAIL)
+    demoted.entra_object_id = OID
+    await session.commit()
+    admin_settings = make_settings(
+        database_url,
+        entra_client_id="client",
+        entra_client_secret="not-a-real-secret",
+        entra_tenant_id=TENANT_A,
+        bootstrap_admin_emails=LOGIN_EMAIL,
+    )
+    user, _oauth, _redirect = await _login(session, admin_settings)
+    assert user.id == demoted.id
+    stored = await fresh.get(User, demoted.id)
+    assert stored is not None
+    assert (stored.role, stored.display_name) == (UserRole.MEMBER, "Pat User")
 
 
 @pytest.mark.parametrize(
