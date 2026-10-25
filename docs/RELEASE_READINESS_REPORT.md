@@ -46,8 +46,8 @@ All commands from the repository root (macOS arm64, Python 3.14.6, Node 24, Dock
 
 | Suite | Command | Result |
 |---|---|---|
-| Lint, format, types | `uv run ruff check . && uv run ruff format --check . && uv run mypy app` | clean (strict mypy, 96 source files) |
-| Backend, SQLite, coverage gate | `uv run pytest --cov=app` | **4,006 passed**, 12 skipped (PostgreSQL-only), 5 strict xfail; coverage **99.69 %** (gate 99 %) |
+| Lint, format, types | `uv run ruff check . && uv run ruff format --check . && uv run mypy app` | clean (strict mypy, 98 source files) |
+| Backend, SQLite, coverage gate | `uv run pytest --cov=app` | on `64a6db6`: **4,233 passed**, 52 skipped (PostgreSQL-only), 5 strict xfail; coverage gate (99 %) passed: 14 of 8,440 statements missed, 16 partial branches of 1,786. (Release review, `a73afd7`: 4,006 passed, 99.69 %) |
 | Backend, PostgreSQL 18 | `TEST_DATABASE_URL=postgresql+psycopg://…@127.0.0.1:55433/nuvexa_test uv run pytest --cov=app` (throwaway container) | 4,015 passed, 2 skipped, 5 xfail, **1 failed** — a test-helper limitation (checkpoint dump assumed the SQLite saver), fixed in `005aab9`; that file then passed on PostgreSQL (66 passed). Coverage 99.68 %. Final clean run: §2.1 |
 | Frontend | `cd frontend && npm ci && npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run build` | **1,329 passed** (68 files); build OK |
 | Adversarial suites (subset of the above) | `uv run pytest tests/security/test_adversarial_*.py`; `npx vitest run src/test/adversarial-*.test.tsx src/test/prototype-keys.test.tsx` | 281 backend tests in 5 files, frontend adversarial XSS/UI-state/prototype-key suites — all pass after the fixes (49 failed before them) |
@@ -55,25 +55,33 @@ All commands from the repository root (macOS arm64, Python 3.14.6, Node 24, Dock
 | Security scans | `scripts/security-scan.sh all` (pinned scanner images) | §5 — all stages pass after one fixture allowlist |
 | System E2E | `scripts/e2e.sh` (isolated Compose stack: nginx, API, worker, PostgreSQL 18; Playwright Chromium) | §2.2 |
 | Mutation testing | `uv run --with mutmut mutmut run --max-children 8` | §2.3 |
+| DAST (OWASP ZAP 2.17.0) | `scripts/dast.sh` (isolated Compose stack on an internal Docker network; baseline as anonymous + 4 personas, active API scans as anonymous, member, admin) | on `afb11f7`: exit 0, **no High alert, no confirmed vulnerability**; alerts triaged in [DAST_AND_LOAD_TEST.md](DAST_AND_LOAD_TEST.md) §2.4 (the only true positives are documented design decisions) |
+| Load smoke (k6 2.2.0) | `scripts/load-smoke.sh` (isolated stack, 3,030 synthetic emails, 25 VUs, 7.5 min) | on `5b5772b`: all thresholds passed; 7,479 requests, 0 unexpected responses, p95 19.3 ms, 37/37 approval flows completed; a relative laptop baseline, not capacity ([DAST_AND_LOAD_TEST.md](DAST_AND_LOAD_TEST.md) §3) |
 
 Backend test layers: unit 3,223 · integration 310 · security 446 · evaluation 44 (collection fails for a test
 outside these directories, so the CI layer steps cover the whole suite).
 
 ### 2.1 Final PostgreSQL run
 
-On commit `a5bd61d` (all fixes): **4,016 passed**, 2 skipped (SQLite-only), 5 strict xfail; coverage
-**99.68 %**. The PostgreSQL-specific fixes — per-message savepoints when PostgreSQL rejects NUL or over-long
+On commit `64a6db6` (the final tree: every fix, R-1, R-4, the retention function, the trusted-proxy client
+address, HSTS and the DAST tooling): **4,283 passed**, 2 skipped (SQLite-only), 5 strict xfail; coverage
+**99.68 %** (15 of 8,440 statements missed, 16 partial branches of 1,786). Earlier, on `a5bd61d`: 4,016 passed,
+99.68 %. The PostgreSQL-specific fixes — per-message savepoints when PostgreSQL rejects NUL or over-long
 values, row locks on workflow cancel, lease-fenced queue updates, checkpointer timeouts — ran against real
 PostgreSQL 18 here.
 
 ### 2.2 System E2E
 
-`scripts/e2e.sh` on commit `a5bd61d`, images built from that code: **37 passed** (41.6 s) — API black-box
+`scripts/e2e.sh` on commit `64a6db6`, images built from that code: **41 passed** (46.0 s) — API black-box
 through nginx (sessions, CSRF, RBAC, `X-Forwarded-For` spoofing, rate limits), full email → analysis →
 approval → execution flow with the mock Azure DevOps adapter, worker and API restarts (queued jobs and an
 interrupted workflow resume from the PostgreSQL checkpoint), database invariants after the suite (at most one
 succeeded execution per action, one active run per email, no execution without an approval, no plaintext
-tokens) and Playwright Chromium UI flows.
+tokens), the database role split (R-4: the API and worker connect as `nuvexa_app`, which PostgreSQL refuses
+every DDL statement, `TRUNCATE` and direct `UPDATE`/`DELETE` of audit events; the retention function is the only
+delete path and refuses less than 30 days) and Playwright Chromium UI flows. The first run on the merged tree
+failed one of these: the test still expected `DELETE` on `audit_events`, which the retention function had
+deliberately removed; the expectation was tightened, not relaxed. (Earlier: 37 passed on `a5bd61d`.)
 
 ### 2.3 Mutation testing
 
@@ -243,8 +251,10 @@ Defects found in earlier phases (Prompt 1, F-01…F-25) are in [SECURITY_AUDIT.m
 | Re-created Entra user (same e-mail, new object id) is refused | Sign-in blocked until an admin clears the old row (no UI) | Operations runbook ([setup-microsoft-entra.md](setup-microsoft-entra.md)) |
 | Heuristic demo agent: 47 % category accuracy on the holdout set | Demo mode only — real use needs the OpenAI/Azure OpenAI provider, whose quality on real mail was not measured | Evaluate the configured model on representative, consented mail before go-live |
 
-Not performed: dynamic application scanning (DAST), external penetration testing, load and soak testing,
-review of a cloud deployment (none was created). Repository settings are not part of the code:
+Performed since the first version of this report, on isolated local stacks only: DAST with OWASP ZAP and a k6
+load smoke test ([DAST_AND_LOAD_TEST.md](DAST_AND_LOAD_TEST.md), §2 of this report): no confirmed
+vulnerability, no load defect. Not performed: external penetration testing, soak and production-like load
+testing, review of a cloud deployment (none was created). Repository settings are not part of the code:
 branch protection is **not** enabled yet ([CI_SECURITY_GATES.md](CI_SECURITY_GATES.md) §6), exception
 owners are role placeholders, and five Dependabot pull requests are open (they need a rebase; #3 —
 TypeScript 7 — fails the gates on its own).
@@ -284,11 +294,12 @@ mock transports); fakes cannot prove provider behaviour.
 project, consenting test mailboxes, a test LLM key, synthetic or non-confidential mail, and the
 monitoring in §9.
 
-Rationale: every defect found by adversarial testing and the follow-up checks (36, three of them high severity) is fixed with a
+Rationale: every defect found by adversarial testing and the follow-up checks (37, three of them high severity) is fixed with a
 regression test that failed first; the full backend suite passes on SQLite and PostgreSQL with 99.7 %
 line + branch coverage, the frontend with its thresholds; the critical invariants (§4) are covered by
 behaviour-level and adversarial tests; the scans show no fixable vulnerability and no unregistered
-suppression (§5); the system E2E suite passes against real containers (§2.2). The remaining risks (§7)
+suppression (§5); the system E2E suite passes against real containers (§2.2); a DAST scan and a load
+smoke test of an isolated stack found no confirmed vulnerability and no load defect (§2). The remaining risks (§7)
 are documented, owned by a role, and mostly operational.
 
 **Not ready for production mailboxes** until:

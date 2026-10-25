@@ -13,6 +13,17 @@ alert is a false positive, an accepted design decision or informational (§2.4).
 second) every endpoint group answered in under 35 ms at p95 with no errors, no database pool pressure and
 worker jobs done in about 2 s (§3.3). **Nothing here changes the release recommendation** (§5).
 
+**Re-run on the final tree (2026-10-25):** after the shared rate limit (R-1), the database role split (R-4),
+the audit retention function, the trusted-proxy client address and HSTS were merged, both scripts were run
+again with their defaults — the load smoke test on `5b5772b`, the DAST on `afb11f7` (images built from that
+code). DAST: exit 0, no High alert, the same alert set and URL patterns as the reference run below (§2.4);
+73,924 API requests (18,874 answered 429), the only 5xx the 38 documented `500 configuration_error`
+responses of the two unconfigured Microsoft routes; every authenticated scan kept its session. Load: all
+thresholds passed, 7,479 requests (17.7/s), 0 unexpected responses, overall p50 / p95 / p99 6.1 / 19.3 /
+30.1 ms (actions list p95 30.4 ms), 5 × 429 on sync, 37 of 37 flows completed, at most 10 database
+connections (2 active), API CPU at most 17.9 % of one core. The tables below are the first runs; the re-run
+agrees within a few milliseconds.
+
 ## 1. Safety and scope
 
 Only isolated, throwaway stacks on this machine were scanned or loaded:
@@ -236,7 +247,8 @@ failing on laptop noise:
 The heaviest read is the approvals list (`GET /actions?status=pending_approval&status=uncertain`, p95
 32 ms over 3,030 emails), which builds per-action permissions; it is the first query to watch as data grows.
 A real capacity test needs a production-like runtime, realistic data volumes and audit-log sizes, several
-API replicas behind the ingress (with the shared rate limit, risk R-1) and the real LLM provider latency.
+API replicas behind the ingress (with `RATE_LIMIT_BACKEND=database`, risk R-1, which this profile does not
+exercise: the isolated stack keeps the default in-process limiter) and the real LLM provider latency.
 
 ## 4. DEFECT tests
 

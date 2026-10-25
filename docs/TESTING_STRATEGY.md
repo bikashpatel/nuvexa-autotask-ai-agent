@@ -136,7 +136,10 @@ item.
 * Live Microsoft Entra sign-in, Microsoft Graph mailboxes, Azure DevOps organizations and LLM providers.
   These are covered by faithful fakes only. Live checks require sandbox credentials and are opt-in
   (`@pytest.mark.live_llm`, the opt-in sandbox E2E job).
-* Visual regressions, real-browser performance, load and external penetration testing.
+* Visual regressions, real-browser performance, soak and production-like load testing, and external
+  penetration testing. A DAST scan (`scripts/dast.sh`, OWASP ZAP) and a load smoke test
+  (`scripts/load-smoke.sh`, k6) run on demand against an isolated local stack; they are not CI gates
+  (docs/DAST_AND_LOAD_TEST.md).
 
 ## 8. Baseline and results (2026-10-25)
 
@@ -152,6 +155,8 @@ Scanner and CI-gate results: docs/CI_SECURITY_GATES.md §8.
 | CI with the release gates, `aaef287` (runs 40148542307 and 40149198842) | every gate green; PostgreSQL layers 2,663 / 308 / 138 / 44 passed; SQLite 3,143 passed (99.57 %); frontend 1,167; system E2E on the runner 37 passed |
 | Frontend (release review) | 1,329 tests; 99.93 % statements, 98.62 % branches, 100 % functions and lines |
 | Mutation testing, release review (Linux) | 2,667 mutants: 2,342 killed, 305 survived, 19 inconclusive (process crashed), 1 untested — **88.4 %** of conclusive mutants (87.8 % counting crashes as undetected); triage in docs/RELEASE_READINESS_REPORT.md §2.3 |
+| DAST and load smoke (final tree, `afb11f7` / `5b5772b`) | ZAP: no High alert, no confirmed vulnerability; k6: thresholds passed, 0 unexpected responses, p95 19.3 ms — docs/DAST_AND_LOAD_TEST.md |
+| System E2E (`64a6db6`) | 41 passed |
 | Adversarial review (Prompt 5) | 5 independent suites; 49 tests failed on first run (35 defects; P5-36 and P5-37 came from follow-up checks), all fixed test-first — docs/RELEASE_READINESS_REPORT.md §6 |
 | Mutation testing, first run | 2,492 mutants: 2,077 killed, 414 survived, 1 untested — 83.4 %; `state_machine` and `authz` 100 % |
 | Mutation testing, after hardening | 2,180 killed + 7 timeouts (detected), 304 survived, 1 untested — **87.8 %**. Remaining survivors: message/log wording (accepted), database-lock mutants (PostgreSQL concurrency tests), unreachable defaults |
