@@ -619,6 +619,7 @@ async def test_reject_requires_approve_permission(
     with pytest.raises(AuditedPermissionDenied) as info:
         await svc.reject(session, world.actor(world.viewer), viewer_action.id, reason="no")
     assert info.value.permission == Perm.ACTION_APPROVE
+    assert (info.value.resource_type, info.value.resource_id) == ("action", str(viewer_action.id))  # audited target
 
 
 @pytest.mark.parametrize("status", [S.PENDING_APPROVAL, S.APPROVED, S.FAILED])
@@ -698,6 +699,7 @@ async def test_supersede_open_actions_releases_open_proposals(
     assert {a.action_id for a in audits} == set(ids)
     assert all(a.actor_type is ActorType.SYSTEM and a.outcome is AuditOutcome.SUCCESS for a in audits)
     assert all(a.details == {"reason": "re-analysis requested"} and a.workflow_run_id == world.run.id for a in audits)
+    assert all((a.resource_type, a.resource_id) == ("action", str(a.action_id)) for a in audits)
 
 
 async def test_supersede_with_nothing_open(session: AsyncSession, factory: Factory, world: World) -> None:

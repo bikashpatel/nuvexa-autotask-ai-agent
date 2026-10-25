@@ -769,6 +769,7 @@ async def test_execute_repairs_status_after_previous_success(
     # Invariant 9: the status change is audited (it used to be a silent update).
     [audit] = await fresh.audits("execution_status_repaired", action_id=action.id)
     assert (audit.outcome, audit.actor_user_id) == (AuditOutcome.SUCCESS, world.owner.id)
+    assert (audit.resource_type, audit.resource_id) == ("action", str(action.id))
     assert audit.details == {"from_status": lagging.value, "execution_id": str(previous.id), "external_id": "1001"}
 
 
