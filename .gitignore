@@ -45,3 +45,6 @@ mutants/
 
 # CI/scan reports (scripts/security-scan.sh, layered pytest runs)
 reports/
+
+# Claude Code agent worktrees (local only)
+.claude/worktrees/
