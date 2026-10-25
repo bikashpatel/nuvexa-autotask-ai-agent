@@ -152,8 +152,8 @@ skip_covered = true
 exclude_also = ["if TYPE_CHECKING:", "@overload"]
 
 [tool.mutmut]
-# Mutation testing for security-critical modules (manual / scheduled; see docs/TESTING_STRATEGY.md).
-paths_to_mutate = [
+# Mutation testing for security-critical modules (manual / before releases; see docs/TESTING_STRATEGY.md).
+source_paths = [
     "app/domain/state_machine.py",
     "app/services/authz.py",
     "app/services/approval_service.py",
@@ -161,5 +161,15 @@ paths_to_mutate = [
     "app/services/action_policy.py",
     "app/integrations/microsoft_graph/id_token.py",
 ]
-tests_dir = ["tests/unit/", "tests/security/"]
+pytest_add_cli_args_test_selection = ["tests/unit/", "tests/security/"]
+# Not run against mutants: tests of repository configuration (CI workflow, Dockerfiles, nginx, git-tracked
+# files), which mutmut's copy of the tree does not contain, and the source-level egress gate, which reads
+# mutmut's generated function copies as new call sites. None of them exercises the mutated modules' behaviour.
+pytest_add_cli_args = [
+    "--ignore=tests/security/test_ci_pipeline_contract.py",
+    "--ignore=tests/security/test_supply_chain_configuration.py",
+    "--ignore=tests/security/test_adversarial_frontend_headers.py",
+    "--ignore=tests/security/test_external_write_paths.py",
+    "--ignore=tests/unit/tooling/",
+]
 also_copy = ["app/", "tests/", "scripts/"]

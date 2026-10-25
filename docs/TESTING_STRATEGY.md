@@ -26,12 +26,12 @@ exactly one layer and layers can be run independently.
 
 | Layer | Location | Select with | Tests (2026-10-25) | Runtime | What it proves |
 |---|---|---|---|---|---|
-| Unit | `tests/unit/` | `uv run pytest -m unit` | 2,674 | ~60 s | Each module in isolation (services, workflow nodes, adapters with respx, agents, schemas, state machine) |
-| Integration | `tests/integration/` | `uv run pytest -m integration` | 308 | ~60 s | Real API → services → LangGraph → worker → DB in-process; every endpoint, RBAC matrix, OAuth flows, REST adapters against mocked HTTP |
-| Security | `tests/security/` | `uv run pytest -m security` | 139 | ~5 s | Security invariants, regression tests for every audit finding, and release gates: egress inventory / single write path, supply-chain configuration, CI pipeline contract |
+| Unit | `tests/unit/` | `uv run pytest -m unit` | 3,223 | ~60 s | Each module in isolation (services, workflow nodes, adapters with respx, agents, schemas, state machine) |
+| Integration | `tests/integration/` | `uv run pytest -m integration` | 310 | ~60 s | Real API → services → LangGraph → worker → DB in-process; every endpoint, RBAC matrix, OAuth flows, REST adapters against mocked HTTP |
+| Security | `tests/security/` | `uv run pytest -m security` | 446 | ~40 s | Security invariants, regression tests for every audit finding, release gates (egress inventory / single write path, supply-chain configuration, CI pipeline contract) and the adversarial suites (`test_adversarial_*.py`) |
 | Evaluation | `tests/evaluation/` | `uv run pytest -m evaluation` | 44 | ~5 s | Offline AI baseline on the labelled synthetic dataset |
 | PostgreSQL | same files | `TEST_DATABASE_URL=postgresql+psycopg://… uv run pytest` | all + `postgres`-marked concurrency tests | ~5–9 min | Triggers, row locks, `SKIP LOCKED`, partial unique indexes, timeouts |
-| Frontend | `frontend/src/**/*.test.ts(x)` | `npm test` / `npm run test:coverage` | 1,167 | ~20 s | Every component/page/hook/API function; a11y (axe); no optimistic writes; XSS inertness |
+| Frontend | `frontend/src/**/*.test.ts(x)` | `npm test` / `npm run test:coverage` | 1,329 | ~20 s | Every component/page/hook/API function; a11y (axe); no optimistic writes; XSS inertness |
 | System E2E | `e2e/` | `scripts/e2e.sh` | 37 | ~1–2 min + build | Real containers (nginx, API, worker, PostgreSQL), restarts, DB invariants, Playwright UI |
 
 The default `uv run pytest` runs unit + integration + security + evaluation on SQLite with no network and
@@ -91,6 +91,10 @@ uv run --with mutmut mutmut show <mutant-name>      # inspect one
 ```
 
 Scope: `state_machine`, `authz`, `approval_service`, `execution_service`, `action_policy`, `id_token`.
+Mutants run against `tests/unit` and `tests/security`, except the tests of repository configuration (CI
+workflow, Dockerfiles, nginx, git-tracked files — absent from mutmut's copy of the tree) and the source-level
+egress gate (it would read mutmut's generated function copies as new call sites); none of them exercises the
+mutated modules' behaviour (`[tool.mutmut]` in `pyproject.toml`).
 
 Triage rules for survivors:
 
@@ -107,6 +111,17 @@ Triage rules for survivors:
   covered by the PostgreSQL concurrency tests (`tests/integration/test_postgres_concurrency.py`).
 
 Results are recorded in §8. Run mutation testing before releases and after changes to these modules.
+
+## 5a. Adversarial testing
+
+Before a release, independent testers try to break the application rather than confirm it
+(`tests/security/test_adversarial_*.py`, `frontend/src/test/adversarial-*.test.tsx`): malicious email and a
+fully compromised model, forged/stale/replayed approvals, payload tampering, concurrency and ambiguous
+writes, cross-tenant access and session abuse, hostile and oversized input, database failures and crashes
+mid-workflow, provider outages, secret leakage into logs/spans/checkpoints/API responses, XSS and UI-state
+bugs. A test that exposes a defect asserts the correct behaviour and is marked `# DEFECT:` (never xfail);
+the fix is made test-first and the comment becomes `# Regression (Prompt 5): …`. Results and the defect
+list: docs/RELEASE_READINESS_REPORT.md.
 
 ## 6. Flaky tests
 
@@ -130,12 +145,12 @@ Scanner and CI-gate results: docs/CI_SECURITY_GATES.md §8.
 
 | Measure | Result |
 |---|---|
-| Backend tests, SQLite | 3,143 passed, 12 skipped, 5 strict xfail (English-only injection screener limits) |
-| Backend tests, PostgreSQL 18, layered as in CI | unit 2,659 + integration 308 + security 138 + evaluation 44 = 3,149 passed, 2 skipped, 5 xfail |
-| Backend coverage (line + branch) | 99.57 % (SQLite), 99.61 % (PostgreSQL, combined layers); gate 99 % |
+| Backend tests, SQLite (release review, `a73afd7`) | 4,006 passed, 12 skipped, 5 strict xfail (English-only injection screener limits); coverage 99.69 % |
+| Backend tests, PostgreSQL 18 (release review) | see docs/RELEASE_READINESS_REPORT.md §2 |
+| Backend coverage gate | 99 % line + branch (`fail_under`) |
 | CI, Prompt 2 commit `dad3218` (run 40144764111) | PostgreSQL job: 3,038 passed, 2 skipped, 5 xfailed; coverage 99.61 %; all jobs green |
 | CI with the release gates, `aaef287` (runs 40148542307 and 40149198842) | every gate green; PostgreSQL layers 2,663 / 308 / 138 / 44 passed; SQLite 3,143 passed (99.57 %); frontend 1,167; system E2E on the runner 37 passed |
-| Frontend | 1,167 tests; 99.93 % statements, 98.55 % branches, 100 % functions and lines |
-| System E2E | 37 passed |
+| Frontend (release review) | 1,329 tests; 99.93 % statements, 98.62 % branches, 100 % functions and lines |
+| Adversarial review (Prompt 5) | 5 independent suites; 49 tests failed on first run (35 defects), all fixed test-first — docs/RELEASE_READINESS_REPORT.md §6 |
 | Mutation testing, first run | 2,492 mutants: 2,077 killed, 414 survived, 1 untested — 83.4 %; `state_machine` and `authz` 100 % |
 | Mutation testing, after hardening | 2,180 killed + 7 timeouts (detected), 304 survived, 1 untested — **87.8 %**. Remaining survivors: message/log wording (accepted), database-lock mutants (PostgreSQL concurrency tests), unreachable defaults |

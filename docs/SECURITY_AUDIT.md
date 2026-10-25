@@ -63,6 +63,12 @@ Microsoft access). Status **Fixed** means a regression test exists and passed af
 | F-25 | Low (test process) | A test outside the four layer directories would have been selected by none of the per-layer CI steps (none existed) | `tests/conftest.py` | Fixed: collection fails for such a test |
 | F-10 | Medium (accepted) | Debian base-image packages with HIGH CVEs and **no fixed version available** (util-linux libs, ncurses, systemd libs, perl-base, libacl) | `python:3.14-slim-trixie` | Accepted with expiry — see §5 |
 
+### Adversarial review before release (Prompt 5)
+
+A later adversarial review found 35 further defects (P5-01…P5-35; three high severity: an Entra e-mail-claim
+account takeover, a cancelled workflow that could still write, and Azure DevOps error bodies echoing a PAT).
+All are fixed with regression tests; see [RELEASE_READINESS_REPORT.md](RELEASE_READINESS_REPORT.md) §6.
+
 ### Defects found by the test-hardening work (fixed, each with a regression test)
 
 | Area | Defect |

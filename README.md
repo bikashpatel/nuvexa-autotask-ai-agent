@@ -284,7 +284,8 @@ scripts/security-scan.sh all      # the CI security scans locally (Docker; pinne
 - **Idempotency:** unique message ids, one active run per email, one succeeded execution per action,
   Azure DevOps tag lookup before create and after ambiguous failures.
 
-Details: [docs/security-model.md](docs/security-model.md).
+Details: [docs/security-model.md](docs/security-model.md). Release status, verified scope and open risks:
+[docs/RELEASE_READINESS_REPORT.md](docs/RELEASE_READINESS_REPORT.md).
 
 ## Project structure
 
