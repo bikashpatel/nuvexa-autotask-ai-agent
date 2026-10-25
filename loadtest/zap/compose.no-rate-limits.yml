@@ -1,0 +1,11 @@
+# Optional overlay for scripts/dast.sh (DAST_DISABLE_RATE_LIMITS=1): turns the API's in-process rate limits
+# off in the ISOLATED scan stack only.
+#
+# The active scan sends thousands of requests per route as one user from one IP, so with the shipped limits
+# most attacks on the review/execute/validate/sync/sign-in routes are answered 429 before the route runs.
+# A supplementary active pass without limits lets the scan rules reach those handlers. Never use this for
+# any other stack; the default DAST run and the load smoke test keep the limits on.
+services:
+  api:
+    environment:
+      RATE_LIMIT_ENABLED: "false"

@@ -1,0 +1,15 @@
+# Overlay used by scripts/dast.sh and scripts/load-smoke.sh on top of docker-compose.yml.
+#
+# The base file names its images nuvexa-backend:local / nuvexa-frontend:local. Building the isolated
+# DAST / load stack with those names would retag the images of a developer's running demo stack, so
+# the isolated stack builds and runs its own tags instead. Nothing else changes: same demo settings
+# (DEMO_MODE, heuristic agent, mock Azure DevOps), same loopback-only ports.
+services:
+  migrate:
+    image: nuvexa-backend:isolated
+  api:
+    image: nuvexa-backend:isolated
+  worker:
+    image: nuvexa-backend:isolated
+  frontend:
+    image: nuvexa-frontend:isolated
