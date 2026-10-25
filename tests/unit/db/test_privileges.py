@@ -135,8 +135,9 @@ def test_runtime_grants_are_dml_only_and_converge() -> None:
         'GRANT USAGE ON SCHEMA "public" TO "nuvexa_app"',
         'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "public" TO "nuvexa_app"',
         'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "public" TO "nuvexa_app"',
-        # Append-only audit trail: no UPDATE (and TRUNCATE is never granted); DELETE stays for the retention purge.
-        'REVOKE UPDATE ON "public"."audit_events" FROM "nuvexa_app"',
+        # Append-only audit trail: no UPDATE, no DELETE (and TRUNCATE is never granted); the retention purge runs
+        # through the owner-defined function (granted below when it exists).
+        'REVOKE UPDATE, DELETE ON "public"."audit_events" FROM "nuvexa_app"',
         # Migration bookkeeping is read-only at runtime.
         'REVOKE INSERT, UPDATE, DELETE ON "public"."alembic_version" FROM "nuvexa_app"',
         'REVOKE INSERT, UPDATE, DELETE ON "public"."checkpoint_migrations" FROM "nuvexa_app"',
@@ -156,6 +157,12 @@ def test_runtime_grants_never_include_ddl_or_truncate() -> None:
     privileges_granted = {p.strip() for match in granted if match for p in match.group(1).split(",")}
     assert privileges_granted == {"SELECT", "INSERT", "UPDATE", "DELETE", "USAGE", "CONNECT"}
     assert not [s for s in statements if "TO PUBLIC" in s or "WITH GRANT OPTION" in s]
+
+
+def test_the_runtime_role_may_execute_the_audit_purge_function_when_it_exists() -> None:
+    grant = 'GRANT EXECUTE ON FUNCTION "public".nuvexa_purge_audit_events(uuid, integer) TO "nuvexa_app"'
+    assert grant not in runtime_grant_statements(_context())
+    assert grant in runtime_grant_statements(_context(purge_function_exists=True))
 
 
 def test_create_on_the_schema_is_revoked_from_public_when_it_was_granted() -> None:
@@ -194,6 +201,7 @@ def test_findings_name_every_excess_privilege_in_a_stable_order() -> None:
         "create_in_database",
         "truncate_tables",
         "update_audit_events",
+        "delete_audit_events",
     )
     assert findings_from_row(dict.fromkeys(PRIVILEGE_FINDINGS, True)) == list(PRIVILEGE_FINDINGS)
     assert findings_from_row(dict.fromkeys(PRIVILEGE_FINDINGS, False)) == []
@@ -451,3 +459,15 @@ async def test_a_hanging_check_times_out(
 def test_configuration_error_is_the_failure_type_of_the_grants_step() -> None:
     # `nuvexa migrate` fails with an actionable message (not a stack of SQL errors) for a missing or wrong role.
     assert issubclass(privileges.RuntimeRoleError, ConfigurationError)
+
+
+def test_the_audit_purge_floor_matches_the_settings_floor() -> None:
+    from app.db.models import AUDIT_MIN_RETENTION_DAYS, AUDIT_PURGE_FUNCTION_POSTGRES
+    from app.schemas.settings import RetentionConfig
+
+    sql = "\n".join(AUDIT_PURGE_FUNCTION_POSTGRES)
+    assert f"p_retention_days < {AUDIT_MIN_RETENTION_DAYS} THEN" in sql
+    assert f"below the {AUDIT_MIN_RETENTION_DAYS}-day minimum" in sql
+    assert RetentionConfig.model_fields["audit_days"].metadata[0].ge == AUDIT_MIN_RETENTION_DAYS
+    assert "SECURITY DEFINER SET search_path = %1$I, pg_temp" in sql
+    assert "FROM PUBLIC" in sql

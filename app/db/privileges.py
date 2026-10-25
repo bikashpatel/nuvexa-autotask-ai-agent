@@ -5,7 +5,8 @@ PostgreSQL deployments use two roles (docs/security-model.md, "Database roles"):
 * the **owner** (migration) role owns the schema and every table; only `nuvexa migrate` connects as it;
 * the **runtime** role (`DATABASE_RUNTIME_ROLE`), which `nuvexa api` and `nuvexa worker` connect as: SELECT, INSERT,
   UPDATE and DELETE on the application and LangGraph checkpoint tables, USAGE/SELECT on sequences, nothing else —
-  no CREATE, no ownership, no TRUNCATE, no UPDATE of the append-only audit trail.
+  no CREATE, no ownership, no TRUNCATE, no UPDATE or DELETE of the append-only audit trail (the retention purge
+  runs through the owner-defined `nuvexa_purge_audit_events`, which refuses recent rows).
 
 `nuvexa migrate` re-applies the grants after every upgrade (`grant_runtime_privileges`). The step is idempotent and
 convergent: it first revokes everything the runtime role holds on the schema's tables, so a privilege granted by
@@ -35,9 +36,10 @@ log = get_logger(__name__)
 
 RUNTIME_TABLE_PRIVILEGES = "SELECT, INSERT, UPDATE, DELETE"
 RUNTIME_SEQUENCE_PRIVILEGES = "USAGE, SELECT"
-# Rows are never updated (the trigger also refuses it); DELETE stays for the retention purge, which the trigger
-# still gates with the per-transaction `nuvexa.audit_purge` flag.
+# Rows are never updated or deleted by the runtime role (the trigger also refuses both); the retention purge calls
+# the owner-defined SECURITY DEFINER function below, which keeps at least AUDIT_MIN_RETENTION_DAYS of history.
 APPEND_ONLY_TABLES = ("audit_events",)
+AUDIT_PURGE_FUNCTION = "nuvexa_purge_audit_events(uuid, integer)"
 # Bookkeeping written only by migrations (Alembic, LangGraph's setup): readable, never writable at runtime.
 READ_ONLY_TABLES = ("alembic_version", "checkpoint_migrations")
 
@@ -51,6 +53,7 @@ PRIVILEGE_FINDINGS: tuple[str, ...] = (
     "create_in_database",
     "truncate_tables",
     "update_audit_events",
+    "delete_audit_events",
 )
 NOT_RUNTIME_ROLE = "not_runtime_role"
 REMEDIATION = (
@@ -76,7 +79,8 @@ SELECT
         SELECT 1 FROM pg_class c
         WHERE c.relnamespace = n.oid AND c.relkind IN ('r', 'p') AND has_table_privilege(r.oid, c.oid, 'TRUNCATE')
     ) AS truncate_tables,
-    has_table_privilege(r.oid, to_regclass(quote_ident(n.nspname) || '.audit_events'), 'UPDATE') AS update_audit_events
+    has_table_privilege(r.oid, to_regclass(quote_ident(n.nspname) || '.audit_events'), 'UPDATE') AS update_audit_events,
+    has_table_privilege(r.oid, to_regclass(quote_ident(n.nspname) || '.audit_events'), 'DELETE') AS delete_audit_events
 FROM pg_roles r, pg_namespace n
 WHERE r.rolname = :role AND n.nspname = current_schema()
 """
@@ -94,7 +98,9 @@ SELECT
     ARRAY(
         SELECT c.relname::text FROM pg_class c
         WHERE c.relnamespace = to_regnamespace(quote_ident(current_schema())) AND c.relname = ANY(:tables)
-    ) AS existing_tables
+    ) AS existing_tables,
+    to_regprocedure(quote_ident(current_schema()) || '.nuvexa_purge_audit_events(uuid, integer)') IS NOT NULL
+        AS purge_function_exists
 """
 
 
@@ -113,6 +119,7 @@ class GrantContext:
     existing_tables: frozenset[str]
     public_can_create: bool
     role_can_connect: bool
+    purge_function_exists: bool = False
 
 
 def quote_ident(name: str) -> str:
@@ -137,10 +144,12 @@ def runtime_grant_statements(ctx: GrantContext) -> list[str]:
         f"GRANT {RUNTIME_SEQUENCE_PRIVILEGES} ON ALL SEQUENCES IN SCHEMA {schema} TO {role}",
     ]
     statements += [
-        f"REVOKE UPDATE ON {schema}.{quote_ident(t)} FROM {role}"
+        f"REVOKE UPDATE, DELETE ON {schema}.{quote_ident(t)} FROM {role}"
         for t in APPEND_ONLY_TABLES
         if t in ctx.existing_tables
     ]
+    if ctx.purge_function_exists:
+        statements.append(f"GRANT EXECUTE ON FUNCTION {schema}.{AUDIT_PURGE_FUNCTION} TO {role}")
     statements += [
         f"REVOKE INSERT, UPDATE, DELETE ON {schema}.{quote_ident(t)} FROM {role}"
         for t in READ_ONLY_TABLES
@@ -193,6 +202,7 @@ async def apply_runtime_grants(conn: AsyncConnection, role: str) -> tuple[GrantC
         existing_tables=frozenset(facts["existing_tables"]),
         public_can_create=bool(facts["public_can_create"]),
         role_can_connect=bool(facts["role_can_connect"]),
+        purge_function_exists=bool(facts.get("purge_function_exists")),
     )
     for statement in runtime_grant_statements(ctx):
         await conn.execute(text(statement))

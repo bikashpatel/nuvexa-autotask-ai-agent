@@ -166,17 +166,64 @@ async def test_the_whole_workflow_runs_as_the_runtime_role(runtime: RuntimeRole)
         assert counts["audit_events_deleted"] == 1
 
 
-async def test_audit_rows_are_deleted_only_by_the_retention_purge(runtime: RuntimeRole, tenant: Tenant) -> None:
-    event = _audit_event(tenant.id)
+async def test_audit_rows_are_deleted_only_through_the_retention_function(runtime: RuntimeRole, tenant: Tenant) -> None:
+    # The runtime role cannot delete audit rows itself, not even with the purge flag it could set; the
+    # owner-defined purge function deletes only rows older than its 30-day floor.
+    recent, old = _audit_event(tenant.id, age_days=1), _audit_event(tenant.id, age_days=40)
+    async with runtime.db.session() as s:
+        s.add_all([recent, old])
+        await s.commit()
+    assert "permission denied for table audit_events" in await _refused(
+        runtime.db.engine, f"DELETE FROM audit_events WHERE id = '{old.id}'"
+    )
+    async with runtime.db.engine.connect() as conn:
+        await conn.execute(text("SELECT set_config('nuvexa.audit_purge', 'on', true)"))
+        with pytest.raises(DBAPIError, match="permission denied for table audit_events"):
+            await conn.execute(text(f"DELETE FROM audit_events WHERE id = '{recent.id}'"))
+        await conn.rollback()
+    async with runtime.db.engine.begin() as conn:
+        deleted = await conn.scalar(text("SELECT nuvexa_purge_audit_events(:t, 30)"), {"t": tenant.id})
+        ids = set(
+            (await conn.execute(text("SELECT id FROM audit_events WHERE tenant_id = :t"), {"t": tenant.id})).scalars()
+        )
+    assert deleted == 1
+    assert recent.id in ids
+    assert old.id not in ids
+
+
+@pytest.mark.parametrize("days", [29, 0, -1])
+async def test_the_retention_function_refuses_to_purge_recent_audit_history(
+    runtime: RuntimeRole, tenant: Tenant, days: int
+) -> None:
+    event = _audit_event(tenant.id, age_days=1)
     async with runtime.db.session() as s:
         s.add(event)
         await s.commit()
-    message = await _refused(runtime.db.engine, f"DELETE FROM audit_events WHERE id = '{event.id}'")
-    assert "append-only" in message  # DELETE is granted; the trigger still gates it
-    async with runtime.db.engine.begin() as conn:
-        await conn.execute(text("SELECT set_config('nuvexa.audit_purge', 'on', true)"))
-        deleted = await conn.execute(text(f"DELETE FROM audit_events WHERE id = '{event.id}'"))
-    assert deleted.rowcount == 1
+    async with runtime.db.engine.connect() as conn:
+        with pytest.raises(DBAPIError, match="30-day minimum"):
+            await conn.execute(text("SELECT nuvexa_purge_audit_events(:t, :d)"), {"t": tenant.id, "d": days})
+        await conn.rollback()
+    async with runtime.db.session() as s:
+        assert await s.get(AuditEvent, event.id) is not None
+
+
+async def test_the_retention_function_is_hardened_and_not_public(runtime: RuntimeRole) -> None:
+    async with runtime.db.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT p.prosecdef, p.proconfig, pg_get_userbyid(p.proowner) AS owner, "
+                    "has_function_privilege('public', p.oid, 'EXECUTE') AS public_execute, "
+                    "has_function_privilege(:role, p.oid, 'EXECUTE') AS runtime_execute "
+                    "FROM pg_proc p WHERE p.proname = 'nuvexa_purge_audit_events'"
+                ),
+                {"role": runtime.name},
+            )
+        ).one()
+    assert row.prosecdef is True  # runs with the owner's DELETE privilege
+    assert any(c.startswith("search_path=") and c.endswith("pg_temp") for c in row.proconfig), row.proconfig
+    assert row.owner != runtime.name
+    assert (row.public_execute, row.runtime_execute) == (False, True)
 
 
 # --------------------------------------------------------------------------- what it can never do

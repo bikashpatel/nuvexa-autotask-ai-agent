@@ -34,18 +34,24 @@ async def purge_tenant(session: AsyncSession, tenant_id: uuid.UUID, settings: Se
         )
     )
     if (await session.connection()).dialect.name == "postgresql":
-        # The append-only trigger on audit_events only allows deletes inside an explicit retention purge.
-        await session.execute(text("SELECT set_config('nuvexa.audit_purge', 'on', true)"))
-    audits = await session.execute(
-        delete(AuditEvent).where(
-            AuditEvent.tenant_id == tenant_id,
-            AuditEvent.created_at < now - timedelta(days=ts.retention.audit_days),
+        # The runtime role cannot delete audit rows; the owner-defined function does it, with a retention floor
+        # (app.db.models.AUDIT_PURGE_FUNCTION_POSTGRES).
+        audit_deleted = await session.scalar(
+            text("SELECT nuvexa_purge_audit_events(:tenant_id, :days)"),
+            {"tenant_id": tenant_id, "days": ts.retention.audit_days},
         )
-    )
+    else:
+        result = await session.execute(
+            delete(AuditEvent).where(
+                AuditEvent.tenant_id == tenant_id,
+                AuditEvent.created_at < now - timedelta(days=ts.retention.audit_days),
+            )
+        )
+        audit_deleted = getattr(result, "rowcount", 0)
     counts = {
         "email_bodies_purged": int(getattr(bodies, "rowcount", 0) or 0),
         "workflow_events_deleted": int(getattr(events, "rowcount", 0) or 0),
-        "audit_events_deleted": int(getattr(audits, "rowcount", 0) or 0),
+        "audit_events_deleted": int(audit_deleted or 0),
     }
     record_audit(
         session,

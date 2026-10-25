@@ -222,20 +222,22 @@ drop the schema, disable the audit triggers or rewrite the audit trail:
   `audit_events`, disabling or dropping triggers, `SET session_replication_role`, taking ownership, changing
   role attributes and writing the migration bookkeeping tables — each with `insufficient_privilege` from the
   privilege system, before any trigger runs.
-* **Defence in depth for the audit trail.** `DELETE` on `audit_events` stays for the retention purge; the
-  append-only trigger still refuses it unless the transaction sets `nuvexa.audit_purge`.
+* **Defence in depth for the audit trail.** The runtime role has neither `UPDATE` nor `DELETE` on `audit_events`.
+  The retention purge calls `nuvexa_purge_audit_events(tenant, days)`, a `SECURITY DEFINER` function owned by the
+  owner role (pinned `search_path`, not executable by PUBLIC) that deletes only that tenant's rows older than the
+  retention period and refuses anything younger than 30 days — a compromised API or worker cannot erase recent
+  audit history. The append-only trigger still refuses every other delete.
 * **Production safety net.** With `APP_ENV=production`, `api` and `worker` check their own role at startup and
   log a `database_role_overprivileged` WARNING with `findings` (`superuser`, `createrole`, `owns_schema`,
   `owns_tables`, `create_in_schema`, `create_in_database`, `truncate_tables`, `update_audit_events`,
-  `not_runtime_role`). They do not refuse to start; alert on the event.
+  `delete_audit_events`, `not_runtime_role`). They do not refuse to start; alert on the event.
 
 ## Residual risks / roadmap
 
 * In-process rate limiting (see above).
-* The runtime database role keeps `DELETE` on `audit_events` for the retention purge and can set the purge flag
-  itself, so a fully compromised API/worker could still delete audit rows (detected neither by the HMAC nor by
-  the trigger — see R-3). Moving the purge into a `SECURITY DEFINER` function owned by the owner role that only
-  deletes rows older than the retention window, and revoking `DELETE` from the runtime role, would close this.
+* A fully compromised API/worker can still shorten audit retention for its tenants to the 30-day floor (the
+  retention period is a tenant setting it can write), so audit rows older than 30 days are not protected against it;
+  rows younger than that cannot be deleted at runtime. A superuser can delete anything (R-3).
 * Webhook (Graph change notifications) ingestion is designed but not enabled; polling/manual sync is used.
 * Attachment content is never downloaded in the MVP (metadata only).
 * LLM classification can still be wrong; humans approve every action.

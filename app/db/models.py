@@ -472,8 +472,45 @@ AUDIT_APPEND_ONLY_SQLITE = [
     BEGIN SELECT RAISE(ABORT, 'audit_events is append-only (UPDATE blocked)'); END
     """,
 ]
+# Minimum audit retention the database itself enforces (RetentionConfig.audit_days has the same floor; the SQL
+# below spells the number out and tests/unit/db/test_privileges.py keeps them equal).
+AUDIT_MIN_RETENTION_DAYS = 30
+# The only sanctioned way to delete audit rows on PostgreSQL. The runtime role has no DELETE on audit_events
+# (app.db.privileges); this owner-defined SECURITY DEFINER function deletes one tenant's rows older than the
+# retention period and refuses to touch anything younger than AUDIT_MIN_RETENTION_DAYS, so a compromised API
+# or worker can never erase recent audit history. search_path is pinned (schema, then pg_temp) so objects in
+# other schemas or temporary tables cannot be substituted.
+AUDIT_PURGE_FUNCTION_POSTGRES = [
+    """
+    DO $do$
+    BEGIN
+        EXECUTE format($f$
+            CREATE OR REPLACE FUNCTION %1$I.nuvexa_purge_audit_events(p_tenant_id uuid, p_retention_days integer)
+            RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path = %1$I, pg_temp AS $body$
+            DECLARE
+                deleted bigint;
+            BEGIN
+                IF p_retention_days IS NULL OR p_retention_days < 30 THEN
+                    RAISE EXCEPTION 'audit retention below the 30-day minimum'
+                        USING ERRCODE = 'invalid_parameter_value';
+                END IF;
+                PERFORM set_config('nuvexa.audit_purge', 'on', true);
+                DELETE FROM audit_events
+                WHERE tenant_id = p_tenant_id AND created_at < now() - make_interval(days => p_retention_days);
+                GET DIAGNOSTICS deleted = ROW_COUNT;
+                PERFORM set_config('nuvexa.audit_purge', 'off', true);
+                RETURN deleted;
+            END
+            $body$$f$, current_schema());
+        EXECUTE format(
+            'REVOKE ALL ON FUNCTION %1$I.nuvexa_purge_audit_events(uuid, integer) FROM PUBLIC', current_schema()
+        );
+    END
+    $do$
+    """,
+]
 # DDL() applies Python %-formatting to its text, so literal "%" (PL/pgSQL RAISE placeholders) is doubled here.
-for _statement in AUDIT_APPEND_ONLY_POSTGRES:
+for _statement in [*AUDIT_APPEND_ONLY_POSTGRES, *AUDIT_PURGE_FUNCTION_POSTGRES]:
     _ddl = DDL(_statement.replace("%", "%%")).execute_if(dialect="postgresql")  # type: ignore[no-untyped-call]
     event.listen(AuditEvent.__table__, "after_create", _ddl)
 for _statement in AUDIT_APPEND_ONLY_SQLITE:
