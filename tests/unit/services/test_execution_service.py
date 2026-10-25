@@ -909,6 +909,7 @@ async def test_execute_with_stale_lease_reconciles_instead_of_resending(
     old = await fresh.get(ActionExecution, crashed.id)
     assert old is not None
     assert old.status is E.UNCERTAIN
+    assert old.error_category is FailureCategory.AMBIGUOUS  # the crashed attempt's outcome is unknown
     assert old.error_message == "Outcome unknown (stale execution lease)."
     assert old.finished_at is not None
     stored = await _action(fresh, action)
@@ -965,6 +966,8 @@ async def test_reconcile_finds_existing_work_item(
     assert stored.status is S.COMPLETED
     assert stored.external_url == item.url
     assert [c.closed for c in ado.clients] == [True]
+    # The lookup runs with the reconciling user's identity (their delegated token in entra_delegated mode).
+    assert [a.user_id for a in ado.actors] == [world.approver.id]
 
 
 async def test_reconcile_confirms_absence(
