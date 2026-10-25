@@ -85,7 +85,7 @@ Trivy's full report includes the unfixed vulnerabilities that the gate skips.
 | SEC-EX-002 | bandit B608 / ruff S608 (false positive: WIQL, escaped and format-checked, not SQL) | `AzureDevOpsClient.find_by_idempotency_tag` | Backend lead | 2027-10-31 |
 | SEC-EX-003 | semgrep `unverified-jwt-decode` | `IdTokenValidator.validate` reads `tid` before verification to select the tenant's keys; only verified claims are returned (tested against tokens edited after signing) | Backend lead | 2027-10-31 |
 | SEC-EX-004 | semgrep `uv-missing-dependency-cooldown` (F-21) | `[tool.uv]`: a 7-day `exclude-newer` today would force 27 packages back, including FastAPI 0.162 → 0.143. Dependabot's cooldown applies meanwhile | Backend lead | **2026-11-02**: enable `exclude-newer = "7 days"` |
-| SEC-EX-005 | gitleaks `jwt`, `generic-api-key` | 4 synthetic test fixtures, each allowlisted by rule + file + exact line | QA lead | 2027-10-31 |
+| SEC-EX-005 | gitleaks `jwt`, `generic-api-key` | 5 synthetic test fixtures, each allowlisted by rule + file + exact line | QA lead | 2027-10-31 |
 
 The owners are roles; assign named people before production. To add an exception:
 

@@ -1,4 +1,4 @@
-# gitleaks configuration: the maintained default rules plus four precise allowlists for synthetic test
+# gitleaks configuration: the maintained default rules plus five precise allowlists for synthetic test
 # fixtures (security-exceptions.toml SEC-EX-005). Each allowlist matches one rule, one file and one exact
 # line (condition AND), so a real secret anywhere else — including elsewhere in these files — is reported.
 # Line regexes use (?m) because gitleaks matches them against the finding's line within its diff fragment
@@ -39,3 +39,11 @@ condition = "AND"
 paths = ['''^tests/unit/integrations/test_azure_devops_client\.py$''']
 regexTarget = "line"
 regexes = ['''(?m)^\+?KEY = "0123456789abcdef" \+ "f" \* 48$''']
+
+[[allowlists]]
+description = "SEC-EX-005: synthetic redaction fixture (the value is the hex digits in order, not a key)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^tests/unit/observability/test_logging\.py$''']
+regexTarget = "line"
+regexes = ['''(?m)^\+?        \("api-key: 0123456789abcdef", f"api-key: \{REDACTED\}"\),$''']
