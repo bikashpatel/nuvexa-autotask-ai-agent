@@ -92,6 +92,17 @@ async def test_app_errors(
     assert resp.headers["x-request-id"] == CID
 
 
+@pytest.mark.parametrize(("exc", "retry_after"), [(RateLimited(retry_after=7), "7"), (RateLimited(), None)])
+async def test_rate_limited_responses_carry_retry_after(
+    raising_app: FastAPI, make_client: ClientFactory, exc: RateLimited, retry_after: str | None
+) -> None:
+    set_exc(raising_app, exc)
+    resp = await _get(make_client, raising_app)
+    assert resp.status_code == 429
+    assert resp.json()["error"]["code"] == "rate_limited"
+    assert resp.headers.get("retry-after") == retry_after
+
+
 async def test_5xx_app_errors_are_logged(
     raising_app: FastAPI, make_client: ClientFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:

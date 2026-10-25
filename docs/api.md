@@ -32,7 +32,7 @@ in [`app/schemas/actions.py`](../app/schemas/actions.py); tenant settings in
   | 500 | `configuration_error` (e.g. Microsoft sign-in requested but Entra ID is not configured), `internal_error` |
   | 413 | `request_too_large` (declared or streamed body over `MAX_REQUEST_BYTES`) |
   | 422 | `validation_failed` (`details` lists field errors) |
-  | 429 | `rate_limited` |
+  | 429 | `rate_limited` — with a `Retry-After` header (whole seconds until a retry can succeed). Sign-in routes also answer `429` (`Retry-After: 5`) when the shared limit store (`RATE_LIMIT_BACKEND=database`) is unavailable |
   | 502 | `integration_error`, `agent_error` — Azure DevOps errors carry only stable identifiers (`TFnnnnnn`, exception type, field reference), never the upstream message text |
 
 * **Async work:** sync, analysis, re-analysis and execution are queued jobs (`202`). Poll the

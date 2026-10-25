@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     DDL,
+    BigInteger,
     Boolean,
     Float,
     ForeignKey,
@@ -478,6 +479,20 @@ for _statement in AUDIT_APPEND_ONLY_POSTGRES:
 for _statement in AUDIT_APPEND_ONLY_SQLITE:
     _ddl = DDL(_statement.replace("%", "%%")).execute_if(dialect="sqlite")  # type: ignore[no-untyped-call]
     event.listen(AuditEvent.__table__, "after_create", _ddl)
+
+
+class RateLimitCounter(Base):
+    """Shared rate-limit counter (RATE_LIMIT_BACKEND=database, app.services.rate_limit): hits per bucket and fixed
+    window. Deployment-level, not tenant data. `bucket` is a keyed HMAC-SHA256 of the limit name, the verified user
+    id or client IP and the window length (never the identity itself); rows expire after two windows."""
+
+    __tablename__ = "rate_limit_counters"
+    __table_args__ = (Index("ix_rate_limit_counters_expires_at", "expires_at"),)
+
+    bucket: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_index: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    hits: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime]
 
 
 class AppSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):

@@ -109,9 +109,30 @@ LLM output crosses the boundary only after Pydantic validation **and** policy va
   ingestion; a message the database still rejects is skipped and recorded, never blocking the mailbox. A
   sync round is bounded by messages, pages, time (`MAIL_SYNC_ROUND_SECONDS`) and body bytes
   (`MAIL_SYNC_MAX_BODY_BYTES`) and resumes from the pending page.
-* In-process rate limiting on auth, sync, analyze, approve and execute routes. **Limitation:** limits
-  are per replica; for multi-replica deployments configure a shared limit at the ingress / API
-  gateway.
+* Rate limiting on auth, sync, analyze, approve and execute routes (`429 rate_limited` with
+  `Retry-After` in whole seconds). Buckets are keyed by the verified user, or by client IP on sign-in
+  routes — never by an unverified cookie. `RATE_LIMIT_BACKEND` selects the store:
+  * `memory` (default): exact sliding window **per API process** — with N replicas every limit is N×.
+    A production API started with it logs `rate_limits_are_per_process` (the replica count cannot be
+    known from inside the process, and a single replica is valid, so it warns rather than refusing).
+  * `database` — **required for more than one replica** (or a shared limit at the ingress / gateway):
+    counters in `rate_limit_counters`, shared by every replica on the same database
+    (`app/services/rate_limit.py`). Sliding-window counter over two fixed windows: admitted while
+    `current + previous × (1 − elapsed/window) < limit`. Within a window the limit is exact under any
+    concurrency (one conditional `INSERT … ON CONFLICT DO UPDATE … WHERE hits < cap RETURNING`);
+    the weighting smooths window boundaries (worst case ≈ 2× in one sliding window when all earlier
+    hits fell at the end of the previous window; a plain fixed window allows 2× within an instant);
+    requests crossing a boundary while previous-window requests are in flight can each admit at most
+    one extra request; boundaries follow each replica's wall clock (keep NTP). Denied requests are not
+    counted. Each check uses its own short transaction and connection, never the request's session.
+  * Stored keys are HMAC-SHA256 digests (key derived from `AUDIT_HMAC_KEY`, which replicas share) of
+    limit name, `user:<id>`/`ip:<address>` and window length: no raw IP or user id is stored, and the
+    IPv4 space cannot be enumerated without the key. Rows expire two windows after their window starts
+    and are deleted by the limiter at most once a minute per replica while it serves requests.
+  * If the counter store fails (database error), sign-in routes **fail closed** (`429`,
+    `Retry-After: 5`; anonymous brute-force target, and they need the database anyway) and
+    authenticated routes **fail open** (session just verified; RBAC, approval binding and idempotency
+    still apply); both are logged as `rate_limit_backend_unavailable` without key or IP.
 * Security headers (CSP on the frontend, `X-Content-Type-Options`, `Referrer-Policy`,
   `X-Frame-Options: DENY`).
 * CORS disabled by default (same-origin through the reverse proxy); explicit allow-list otherwise.

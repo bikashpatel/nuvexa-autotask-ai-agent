@@ -12,6 +12,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.context import sanitize_correlation_id, set_correlation_id
 from app.observability.logging import get_logger
+from app.services.rate_limit import RateLimitDecision, retry_after_seconds
 
 log = get_logger("app.http")
 
@@ -166,22 +167,32 @@ async def _error(scope: Scope, send: Send, status: int, code: str, message: str,
 
 
 class SlidingWindowRateLimiter:
-    """In-process limiter (per replica). Use a gateway limit for multi-replica deployments."""
+    """In-process sliding-log limiter (RATE_LIMIT_BACKEND=memory, the default): exact, but per API process — with N
+    replicas every limit is N times larger. More than one replica needs RATE_LIMIT_BACKEND=database
+    (app.services.rate_limit) or a shared limit at the gateway."""
 
     def __init__(self) -> None:
         self._hits: dict[str, deque[float]] = defaultdict(deque)
 
     def allow(self, key: str, limit: int, window_seconds: float) -> bool:
+        return self.check(key, limit, window_seconds).allowed
+
+    async def acquire(self, key: str, limit: int, window_seconds: float) -> RateLimitDecision:
+        return self.check(key, limit, window_seconds)
+
+    def check(self, key: str, limit: int, window_seconds: float) -> RateLimitDecision:
         now = time.monotonic()
         bucket = self._hits[key]
         while bucket and now - bucket[0] > window_seconds:
             bucket.popleft()
         if len(bucket) >= limit:
-            return False
+            # Admitted again once all but `limit - 1` hits are more than `window_seconds` old.
+            blocking = bucket[len(bucket) - limit]
+            return RateLimitDecision(allowed=False, retry_after=retry_after_seconds(blocking + window_seconds - now))
         bucket.append(now)
         if len(self._hits) > 50_000:  # bound memory under key churn
             self._hits.clear()
-        return True
+        return RateLimitDecision(allowed=True)
 
 
 def client_ip(scope_or_request: Any) -> str | None:
