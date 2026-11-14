@@ -10,7 +10,7 @@
 
 # ---------------------------------------------------------------------------------------------
 # Base images are pinned by tag and digest; Dependabot (.github/dependabot.yml) updates both.
-FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS build
+FROM node:26.13.0-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 AS build
 WORKDIR /app
 ENV CI=true \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
