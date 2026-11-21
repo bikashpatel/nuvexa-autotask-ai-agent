@@ -15,7 +15,7 @@
 
 # Base images are pinned by tag *and* digest (Dependabot updates both; the digest makes builds reproducible).
 # uv is pinned to the version that produced uv.lock. Bump both together.
-FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
+FROM ghcr.io/astral-sh/uv:0.13.9@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d AS uv
 
 # ---------------------------------------------------------------------------------------------
 # Builder: resolve and install the locked, non-dev dependency set into /app/.venv
