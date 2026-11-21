@@ -20,7 +20,7 @@ FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ce
 # ---------------------------------------------------------------------------------------------
 # Builder: resolve and install the locked, non-dev dependency set into /app/.venv
 # ---------------------------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8 AS builder
+FROM python:3.14-slim-trixie@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f AS builder
 
 COPY --from=uv /uv /uvx /bin/
 
@@ -48,7 +48,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------------------------------------------------------------------------------------------
 # Runtime: same Python base, no uv, no build tooling, non-root user
 # ---------------------------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8 AS runtime
+FROM python:3.14-slim-trixie@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f AS runtime
 
 LABEL org.opencontainers.image.title="nuvexa-backend" \
       org.opencontainers.image.description="NUVEXA-AutoTask-AI-Agent API / worker / migrations" \
